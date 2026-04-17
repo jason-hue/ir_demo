@@ -3,12 +3,14 @@ package cn.edu.bistu.cs.ir;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableAsync;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 基于SpringBoot的信息检索示例工程启动器
  * @author chenruoyu
  */
 @EnableAsync
+@EnableScheduling
 @SpringBootApplication
 public class IrDemoApplication {
 

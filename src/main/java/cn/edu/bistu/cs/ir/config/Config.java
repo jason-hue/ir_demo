@@ -5,10 +5,9 @@ import lombok.Getter;
 import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import jakarta.annotation.PostConstruct;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
-
-import javax.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -62,11 +61,76 @@ public class Config {
      */
     private boolean startCrawler = false;
 
+    public String getCrawler() {
+        return crawler;
+    }
+
+    public void setHome(String home) {
+        this.home = home;
+    }
+
+    public void setCrawler(String crawler) {
+        this.crawler = crawler;
+    }
+
+    public void setIdx(String idx) {
+        this.idx = idx;
+    }
+
+    public String getAgent() {
+        return agent;
+    }
+
+    public void setAgent(String agent) {
+        this.agent = agent;
+    }
+
+    public int getRetryTimes() {
+        return retryTimes;
+    }
+
+    public void setRetryTimes(int retryTimes) {
+        this.retryTimes = retryTimes;
+    }
+
+    public int getSleepTime() {
+        return sleepTime;
+    }
+
+    public void setSleepTime(int sleepTime) {
+        this.sleepTime = sleepTime;
+    }
+
+    public boolean isStartCrawler() {
+        return startCrawler;
+    }
+
+    public void setStartCrawler(boolean startCrawler) {
+        this.startCrawler = startCrawler;
+    }
+
     @PostConstruct
     public void init(){
+        normalizeDirs();
         createDir(home);
         createDir(idx);
         createDir(crawler);
+    }
+
+    private void normalizeDirs() {
+        if (isBlank(home)) {
+            home = "workspace";
+        }
+        if (isBlank(idx)) {
+            idx = Path.of(home, "idx").toString();
+        }
+        if (isBlank(crawler)) {
+            crawler = Path.of(home, "crawler").toString();
+        }
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private void createDir(String dir){
