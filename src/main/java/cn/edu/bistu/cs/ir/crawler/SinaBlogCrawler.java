@@ -1,6 +1,7 @@
 package cn.edu.bistu.cs.ir.crawler;
 
 import cn.edu.bistu.cs.ir.model.Blog;
+import cn.edu.bistu.cs.ir.model.ArticleIds;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import us.codecraft.webmagic.Page;
@@ -9,6 +10,7 @@ import us.codecraft.webmagic.processor.PageProcessor;
 
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -63,17 +65,23 @@ public class SinaBlogCrawler implements PageProcessor {
             String content = page.getHtml().xpath("//div[@id='articlebody']//div[@id='sina_keyword_ad_area2']/tidyText()").get();
             //TODO 请大家思考如何抓取页面中的标签、分类，阅读数、收藏数等数据
             Blog blog = new Blog();
-            blog.setId(id);
+            blog.setSource("sina-blog");
+            blog.setSourceUrl(url);
             blog.setTitle(title);
-            blog.setContent(content);
+            blog.setBody(content);
             try {
-                blog.setDate(sdf.parse(time).getTime());
+                blog.setPublishTime(sdf.parse(time).toInstant());
             } catch (ParseException e) {
                 log.error("无法识别的日期时间格式:[{}]", time);
                 e.printStackTrace();
-                blog.setDate(0);
+                blog.setPublishTime(null);
             }
+            blog.setCrawlTime(Instant.now());
             blog.setAuthor(blogger);
+            blog.setDocId(ArticleIds.generateDocId(blog.getSourceUrl(), blog.getSource(), blog.getTitle(), blog.getPublishTime()));
+            if (blog.getDocId() == null) {
+                blog.setId(id);
+            }
             page.putField(RESULT_ITEM_KEY, blog);
         }else{
             log.warn("暂不支持的URL地址:[{}]", url);

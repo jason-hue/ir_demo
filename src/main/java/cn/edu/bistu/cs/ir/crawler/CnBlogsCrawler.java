@@ -2,6 +2,7 @@ package cn.edu.bistu.cs.ir.crawler;
 
 import cn.edu.bistu.cs.ir.model.Blog;
 import cn.edu.bistu.cs.ir.model.BlogStats;
+import cn.edu.bistu.cs.ir.model.ArticleIds;
 import cn.edu.bistu.cs.ir.utils.HttpUtils;
 import cn.edu.bistu.cs.ir.utils.StringUtil;
 import com.alibaba.fastjson.JSONObject;
@@ -13,6 +14,7 @@ import us.codecraft.webmagic.processor.PageProcessor;
 
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -77,9 +79,10 @@ public class CnBlogsCrawler implements PageProcessor {
             String content = page.getHtml().xpath("//div[@class='post']//div[@id='cnblogs_post_body']/allText()").get();
             //TODO 请大家思考如何抓取页面中的标签、阅读数、评论数等数据?
             Blog blog = new Blog();
-            blog.setId(id);
+            blog.setSource("cnblogs");
+            blog.setSourceUrl(url);
             blog.setTitle(title);
-            blog.setContent(content);
+            blog.setBody(content);
             blog.setAuthor(bloggerId);
             HttpUtils httpUtils = new HttpUtils();
             String json = httpUtils.postJson(
@@ -94,11 +97,16 @@ public class CnBlogsCrawler implements PageProcessor {
                 }
             }
             try {
-                blog.setDate(sdf.parse(time).getTime());
+                blog.setPublishTime(sdf.parse(time).toInstant());
             } catch (ParseException e) {
                 log.error("无法识别的日期时间格式:[{}]", time);
                 e.printStackTrace();
-                blog.setDate(0);
+                blog.setPublishTime(null);
+            }
+            blog.setCrawlTime(Instant.now());
+            blog.setDocId(ArticleIds.generateDocId(blog.getSourceUrl(), blog.getSource(), blog.getTitle(), blog.getPublishTime()));
+            if (StringUtil.isEmpty(blog.getDocId())) {
+                blog.setId(id);
             }
             page.putField(RESULT_ITEM_KEY, blog);
         }else{

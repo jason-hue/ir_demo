@@ -1,0 +1,35 @@
+[
+  {
+    "source": "tencent-news",
+    "sourceUrl": "https://news.qq.com/rain/a/20260410A03ZS300",
+    "title": "腾讯新闻推出新闻检索助手试点",
+    "body": "北京信息科技大学在课堂上试点新闻检索助手，帮助学生整理新闻语料。教师在信息检索课程中演示了基于Lucene的关键词检索与摘要生成。项目组表示会继续完善本地优先的教学实验环境。",
+    "publishTime": "2024-03-18T09:30:00Z",
+    "crawlTime": "2024-03-18T10:00:00Z",
+    "section": "tech",
+    "author": "腾讯教育",
+    "byline": "腾讯教育"
+  },
+  {
+    "source": "tencent-news",
+    "sourceUrl": "https://news.qq.com/rain/a/20260410A0390000",
+    "title": "新闻检索助手扩展到信息检索实验课",
+    "body": "新闻检索助手继续服务北京信息科技大学的信息检索实验课，帮助学生完成中文关键词检索。课程团队继续完善Lucene索引。",
+    "publishTime": "2024-03-19T09:30:00Z",
+    "crawlTime": "2024-03-19T10:00:00Z",
+    "section": "tech",
+    "author": "腾讯教育",
+    "byline": "腾讯教育"
+  },
+  {
+    "source": "tencent-news",
+    "sourceUrl": "https://news.qq.com/rain/a/20260414A04RSY00",
+    "title": "北京信息科技大学完善新闻检索助手体验",
+    "body": "学校继续完善新闻检索助手体验，加入中文检索分页与结果展示元数据。信息检索课程学生可以直接查询文章来源与作者。",
+    "publishTime": "2024-03-20T09:30:00Z",
+    "crawlTime": "2024-03-20T10:00:00Z",
+    "section": "tech",
+    "author": "腾讯教育",
+    "byline": "腾讯教育"
+  }
+]

@@ -1,6 +1,7 @@
 package cn.edu.bistu.cs.ir.utils;
 
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -9,9 +10,13 @@ import org.springframework.test.context.junit.jupiter.SpringExtension;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * 这些用例依赖真实网络响应，只在显式启用 live-network-tests 配置时运行。
+ */
+@Tag("live-network")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, classes = {HttpUtils.class})
 @ExtendWith(SpringExtension.class)
-public class HttpUtilsTest {
+public class HttpUtilsLiveNetworkTest {
 
     @Test
     public void getPageTest(){
