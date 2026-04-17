@@ -1,7 +1,11 @@
 package cn.edu.bistu.cs.ir.index;
 
+import cn.edu.bistu.cs.ir.ai.ArticleChunkVectorSyncService;
+import cn.edu.bistu.cs.ir.crawler.IngestionObservabilityService;
 import cn.edu.bistu.cs.ir.crawler.SinaBlogCrawler;
+import cn.edu.bistu.cs.ir.model.Article;
 import cn.edu.bistu.cs.ir.model.Blog;
+import cn.edu.bistu.cs.ir.utils.StringUtil;
 import org.apache.lucene.document.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,9 +23,27 @@ public class LucenePipeline implements Pipeline {
     private static final Logger log = LoggerFactory.getLogger(LucenePipeline.class);
 
     private final IdxService idxService;
-    public LucenePipeline(IdxService idxService){
+
+    private final ArticleChunkVectorSyncService articleChunkVectorSyncService;
+
+    private final IngestionObservabilityService ingestionObservabilityService;
+
+    private final String categoryName;
+
+    public LucenePipeline(IdxService idxService,
+                          ArticleChunkVectorSyncService articleChunkVectorSyncService){
+        this(idxService, articleChunkVectorSyncService, null, null);
+    }
+
+    public LucenePipeline(IdxService idxService,
+                          ArticleChunkVectorSyncService articleChunkVectorSyncService,
+                          IngestionObservabilityService ingestionObservabilityService,
+                          String categoryName){
         log.info("初始化LucenePipeline模块");
         this.idxService = idxService;
+        this.articleChunkVectorSyncService = articleChunkVectorSyncService;
+        this.ingestionObservabilityService = ingestionObservabilityService;
+        this.categoryName = categoryName;
     }
 
     @Override
@@ -29,25 +51,66 @@ public class LucenePipeline implements Pipeline {
         Blog blog = resultItems.get(SinaBlogCrawler.RESULT_ITEM_KEY);
         if(blog==null){
             log.error("无法从爬取的结果中提取到Blog对象");
+            recordIndexFailure("无法从爬取的结果中提取到Blog对象", null);
             return;
         }
-        String id = blog.getId();
+        blog.ensureCanonicalIdentity();
+        String id = blog.getDocId();
         Document doc = toDoc(blog);
-        boolean result = idxService.addDocument("ID", id, doc);
+        boolean result = idxService.addDocument(ArticleIdxFields.ID, id, doc);
         if(!result){
             log.error("无法将ID为[{}]的博客内容写入索引", id);
+            recordIndexFailure("无法将博客内容写入Lucene索引", blog);
+            return;
+        }
+        recordIndexSuccess(blog);
+        articleChunkVectorSyncService.syncArticle(blog);
+    }
+
+    private void recordIndexSuccess(Blog blog) {
+        if (ingestionObservabilityService != null && categoryName != null) {
+            ingestionObservabilityService.recordIndexSuccess(categoryName, blog);
         }
     }
 
-    private Document toDoc(Blog blog){
+    private void recordIndexFailure(String detail, Blog blog) {
+        if (ingestionObservabilityService != null && categoryName != null) {
+            ingestionObservabilityService.recordIndexFailure(categoryName, detail, blog);
+        }
+    }
+
+    static Document toDoc(Article article){
+        article.ensureCanonicalIdentity();
         Document document = new Document();
         //页面ID
-        document.add(new StringField("ID", blog.getId(), Field.Store.YES));
+        document.add(new StringField(ArticleIdxFields.ID, article.getDocId(), Field.Store.YES));
         //页面标题
-        document.add(new TextField("TITLE", blog.getTitle(), Field.Store.YES));
+        document.add(new TextField(ArticleIdxFields.TITLE, article.getTitle(), Field.Store.YES));
         //页面内容全文
-        document.add(new TextField("CONTENT", blog.getContent(), Field.Store.YES));
-        //TODO 下面请同学们补充其他的待检索字段，如发布时间、标签、作者等，并思考应该选择什么字段类型
+        if (!StringUtil.isEmpty(article.getBody())) {
+            document.add(new TextField(ArticleIdxFields.CONTENT, article.getBody(), Field.Store.YES));
+        }
+        if (article.getPublishTime() != null) {
+            long publishTime = article.getPublishTime().toEpochMilli();
+            document.add(new LongPoint(ArticleIdxFields.TIME, publishTime));
+            document.add(new StoredField(ArticleIdxFields.TIME, publishTime));
+            document.add(new NumericDocValuesField(ArticleIdxFields.TIME, publishTime));
+        }
+        if (!StringUtil.isEmpty(article.getAuthor())) {
+            document.add(new TextField(ArticleIdxFields.AUTHOR, article.getAuthor(), Field.Store.YES));
+        }
+        if (!StringUtil.isEmpty(article.getByline())) {
+            document.add(new TextField(ArticleIdxFields.BYLINE, article.getByline(), Field.Store.YES));
+        }
+        if (!StringUtil.isEmpty(article.getSource())) {
+            document.add(new StringField(ArticleIdxFields.SOURCE, article.getSource(), Field.Store.YES));
+        }
+        if (!StringUtil.isEmpty(article.getSourceUrl())) {
+            document.add(new StringField(ArticleIdxFields.SOURCE_URL, article.getSourceUrl(), Field.Store.YES));
+        }
+        if (!StringUtil.isEmpty(article.getSection())) {
+            document.add(new StringField(ArticleIdxFields.SECTION, article.getSection(), Field.Store.YES));
+        }
         return document;
     }
 }

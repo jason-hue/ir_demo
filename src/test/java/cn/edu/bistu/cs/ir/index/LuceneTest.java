@@ -1,12 +1,15 @@
 package cn.edu.bistu.cs.ir.index;
 
+import cn.edu.bistu.cs.ir.controller.QueryController;
+import cn.edu.bistu.cs.ir.model.Blog;
 import cn.edu.bistu.cs.ir.model.School;
+import cn.edu.bistu.cs.ir.utils.QueryResponse;
 import cn.edu.bistu.cs.ir.utils.FileUtils;
 import cn.edu.bistu.cs.ir.utils.StringUtil;
 import com.alibaba.fastjson.JSONObject;
+import com.hankcs.lucene.HanLPAnalyzer;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.queryparser.classic.QueryParser;
@@ -16,13 +19,20 @@ import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.util.SloppyMath;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,10 +45,14 @@ import static cn.edu.bistu.cs.ir.model.IdxFields.*;
 @Slf4j
 public class LuceneTest{
 
+    private static final String ARTICLE_TEST_HOME = "workspace/test-lucene-articles-" + System.nanoTime();
+
+    private static final String ARTICLE_FIXTURE = "fixtures/tencent/news/article-page.html";
+
     /**
      * 分词器
      */
-    private static final Class<? extends Analyzer> ANALYZER_CLS = StandardAnalyzer.class;
+    private static final Class<? extends Analyzer> ANALYZER_CLS = HanLPAnalyzer.class;
 
     /**
      * 测试的工作目录
@@ -49,6 +63,22 @@ public class LuceneTest{
      * 测试使用的资源文件
      */
     private static final String TEST_FILE = "school.json";
+
+    @Autowired
+    private IdxService idxService;
+
+    @Autowired
+    private QueryController queryController;
+
+    @DynamicPropertySource
+    static void registerProperties(DynamicPropertyRegistry registry) {
+        registry.add("app.ai.enabled", () -> false);
+        registry.add("app.vector.enabled", () -> false);
+        registry.add("app.crawler.tencent.enabled", () -> false);
+        registry.add("irdemo.dir.home", () -> ARTICLE_TEST_HOME);
+        registry.add("irdemo.dir.idx", () -> ARTICLE_TEST_HOME + "/idx");
+        registry.add("irdemo.dir.crawler", () -> ARTICLE_TEST_HOME + "/crawler");
+    }
 
     /**
      * 索引的Writer
@@ -83,7 +113,7 @@ public class LuceneTest{
             IndexWriterConfig config = new IndexWriterConfig(analyzer);
             iwriter = new IndexWriter(directory, config);
             //读取资源文件中的信息
-            String json = Files.readString(new ClassPathResource(TEST_FILE).getFile().toPath());
+            String json = readClasspathResource(TEST_FILE);
             List<School> schoolList = JSONObject.parseArray(json, School.class);
             //为学校信息构建索引
             for(School school: schoolList){
@@ -99,6 +129,13 @@ public class LuceneTest{
                 iwriter.close();
                 log.info("成功完成索引构建");
             }
+        }
+    }
+
+    private static String readClasspathResource(String resourcePath) throws IOException {
+        ClassPathResource resource = new ClassPathResource(resourcePath);
+        try (InputStream inputStream = resource.getInputStream()) {
+            return new String(inputStream.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 
@@ -206,6 +243,78 @@ public class LuceneTest{
         }
     }
 
+    @Test
+    public void chineseArticleQueryReturnsFixtureBackedResults() throws Exception {
+        seedTencentArticles();
+
+        List<Document> docs = idxService.queryByKw("新闻检索助手", 1, 10);
+
+        Assertions.assertFalse(docs.isEmpty());
+        Assertions.assertAll(
+                () -> Assertions.assertTrue(docs.stream().anyMatch(doc -> "腾讯新闻推出新闻检索助手试点".equals(doc.get(ArticleIdxFields.TITLE)))),
+                () -> Assertions.assertTrue(docs.stream().allMatch(doc -> doc.get(ArticleIdxFields.SOURCE_URL) != null)),
+                () -> Assertions.assertTrue(docs.stream().allMatch(doc -> doc.get(ArticleIdxFields.SOURCE) != null))
+        );
+    }
+
+    @Test
+    public void queryControllerAppliesRealPaginationAndReturnsCanonicalFields() throws Exception {
+        seedTencentArticles();
+
+        QueryResponse<List<Map<String, String>>> firstPage = queryController.queryByKw("新闻检索助手", 1, 2);
+        QueryResponse<List<Map<String, String>>> secondPage = queryController.queryByKw("新闻检索助手", 2, 2);
+
+        Assertions.assertAll(
+                () -> Assertions.assertTrue(firstPage.isSuccess()),
+                () -> Assertions.assertTrue(secondPage.isSuccess()),
+                () -> Assertions.assertEquals(2, firstPage.getData().size()),
+                () -> Assertions.assertEquals(1, secondPage.getData().size()),
+                () -> Assertions.assertNotEquals(firstPage.getData().get(0).get(ArticleIdxFields.ID), secondPage.getData().get(0).get(ArticleIdxFields.ID)),
+                () -> Assertions.assertEquals("tencent-news", firstPage.getData().get(0).get(ArticleIdxFields.SOURCE)),
+                () -> Assertions.assertNotNull(firstPage.getData().get(0).get(ArticleIdxFields.SOURCE_URL)),
+                () -> Assertions.assertNotNull(firstPage.getData().get(0).get(ArticleIdxFields.TIME)),
+                () -> Assertions.assertNotNull(firstPage.getData().get(0).get(ArticleIdxFields.AUTHOR)),
+                () -> Assertions.assertNotNull(firstPage.getData().get(0).get(ArticleIdxFields.BYLINE))
+        );
+    }
+
+    @Test
+    public void repeatIngestOfSameCanonicalTencentArticleKeepsSingleLuceneDocument() throws Exception {
+        Blog first = buildTencentArticle(
+                "http://new.qq.com/rain/a/20240318a01ab000/?from=fixture",
+                "腾讯新闻推出新闻检索助手试点",
+                "北京信息科技大学在课堂上试点新闻检索助手，帮助学生整理新闻语料。\n教师在信息检索课程中演示了基于Lucene的关键词检索与摘要生成。\n",
+                Instant.parse("2024-03-18T09:30:00Z"),
+                Instant.parse("2024-03-18T10:00:00Z"));
+        Blog second = buildTencentArticle(
+                "https://news.qq.com/rain/a/20240318A01AB000#fragment",
+                "腾讯新闻推出新闻检索助手试点",
+                "北京信息科技大学在课堂上试点新闻检索助手，帮助学生整理新闻语料。\n教师在信息检索课程中演示了基于Lucene的关键词检索与摘要生成。\n",
+                Instant.parse("2024-03-18T09:30:00Z"),
+                Instant.parse("2024-03-18T10:05:00Z"));
+
+        int beforeDocCount;
+        try (Directory beforeDirectory = new MMapDirectory(Path.of(ARTICLE_TEST_HOME, "idx"));
+             DirectoryReader beforeReader = DirectoryReader.open(beforeDirectory)) {
+            beforeDocCount = beforeReader.numDocs();
+        }
+
+        Assertions.assertTrue(idxService.addDocument(ArticleIdxFields.ID, first.getDocId(), LucenePipeline.toDoc(first)));
+        Assertions.assertTrue(idxService.addDocument(ArticleIdxFields.ID, second.getDocId(), LucenePipeline.toDoc(second)));
+
+        try (Directory directory = new MMapDirectory(Path.of(ARTICLE_TEST_HOME, "idx"));
+             DirectoryReader reader = DirectoryReader.open(directory)) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            TopDocs docs = searcher.search(new TermQuery(new Term(ArticleIdxFields.ID, first.getDocId())), 10);
+            Assertions.assertAll(
+                    () -> Assertions.assertEquals(first.getDocId(), second.getDocId()),
+                    () -> Assertions.assertEquals(1, docs.totalHits.value),
+                    () -> Assertions.assertEquals(beforeDocCount, reader.numDocs()),
+                    () -> Assertions.assertEquals("https://news.qq.com/rain/a/20240318A01AB000", searcher.doc(docs.scoreDocs[0].doc).get(ArticleIdxFields.SOURCE_URL))
+            );
+        }
+    }
+
 
     private static Document toDoc(School school){
         Document doc = new Document();
@@ -257,7 +366,59 @@ public class LuceneTest{
     public static void destroy(){
         //测试完成后，清理索引目录
         FileUtils.deleteSubDirs(TEST_HOME);
+        FileUtils.deleteSubDirs(ARTICLE_TEST_HOME);
         log.info("完成索引目录清理");
+    }
+
+    private void seedTencentArticles() throws Exception {
+        for (Blog article : buildTencentArticles()) {
+            Assertions.assertTrue(idxService.addDocument(ArticleIdxFields.ID, article.getDocId(), LucenePipeline.toDoc(article)));
+        }
+    }
+
+    private List<Blog> buildTencentArticles() throws Exception {
+        Files.readString(new ClassPathResource(ARTICLE_FIXTURE).getFile().toPath());
+        Blog first = buildTencentArticle(
+                "https://news.qq.com/rain/a/20240318A01AB000",
+                "腾讯新闻推出新闻检索助手试点",
+                "北京信息科技大学在课堂上试点新闻检索助手，帮助学生整理新闻语料。\n教师在信息检索课程中演示了基于Lucene的关键词检索与摘要生成。\n项目组表示会继续完善本地优先的教学实验环境。\n",
+                Instant.parse("2024-03-18T09:30:00Z"),
+                Instant.parse("2024-03-18T10:00:00Z"));
+
+        Blog second = buildTencentArticle(
+                "https://news.qq.com/rain/a/20240319A01CD000",
+                "新闻检索助手扩展到信息检索实验课",
+                "新闻检索助手继续服务北京信息科技大学的信息检索实验课，帮助学生完成中文关键词检索。\n课程团队继续完善Lucene索引。\n",
+                Instant.parse("2024-03-19T09:30:00Z"),
+                Instant.parse("2024-03-19T10:00:00Z"));
+
+        Blog third = buildTencentArticle(
+                "https://news.qq.com/rain/a/20240320A01EF000",
+                "北京信息科技大学完善新闻检索助手体验",
+                "学校继续完善新闻检索助手体验，加入中文检索分页与结果展示元数据。\n信息检索课程学生可以直接查询文章来源与作者。\n",
+                Instant.parse("2024-03-20T09:30:00Z"),
+                Instant.parse("2024-03-20T10:00:00Z"));
+
+        return List.of(first, second, third);
+    }
+
+    private Blog buildTencentArticle(String sourceUrl,
+                                     String title,
+                                     String body,
+                                     Instant publishTime,
+                                     Instant crawlTime) {
+        Blog blog = new Blog();
+        blog.setSource("tencent-news");
+        blog.setSourceUrl(sourceUrl);
+        blog.setTitle(title);
+        blog.setBody(body);
+        blog.setPublishTime(publishTime);
+        blog.setCrawlTime(crawlTime);
+        blog.setSection("tech");
+        blog.setAuthor("腾讯教育");
+        blog.setByline("腾讯教育");
+        blog.ensureCanonicalIdentity();
+        return blog;
     }
 
     /**

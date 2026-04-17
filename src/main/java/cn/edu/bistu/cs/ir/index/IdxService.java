@@ -2,13 +2,14 @@ package cn.edu.bistu.cs.ir.index;
 
 import cn.edu.bistu.cs.ir.config.Config;
 import cn.edu.bistu.cs.ir.utils.StringUtil;
+import com.hankcs.lucene.HanLPAnalyzer;
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.*;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.queryparser.classic.MultiFieldQueryParser;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
 import org.apache.lucene.store.Directory;
@@ -34,12 +35,10 @@ public class IdxService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(IdxService.class);
 
-    private static final Class<? extends Analyzer> DEFAULT_ANALYZER = StandardAnalyzer.class;
-
     private IndexWriter writer;
 
     public IdxService(@Autowired Config config) throws Exception {
-        Analyzer analyzer = DEFAULT_ANALYZER.getConstructor().newInstance();
+        Analyzer analyzer = createAnalyzer();
         Directory index;
         try {
             index = FSDirectory.open(Paths.get(config.getIdx()));
@@ -51,6 +50,10 @@ public class IdxService implements DisposableBean {
             log.error("无法初始化索引，请检查提供的索引目录是否可用:[{}]", config.getIdx());
             writer = null;
         }
+    }
+
+    private static Analyzer createAnalyzer() {
+        return new HanLPAnalyzer();
     }
 
     public boolean addDocument(String idFld, String id, Document doc){
@@ -74,25 +77,54 @@ public class IdxService implements DisposableBean {
         }
     }
 
+    public boolean isAvailable() {
+        return writer != null;
+    }
+
+    public int documentCount() {
+        if (writer == null) {
+            return 0;
+        }
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+            return reader.numDocs();
+        }
+        catch (IOException e) {
+            log.warn("无法统计Lucene索引文档数", e);
+            return -1;
+        }
+    }
+
     /**
      * 根据关键词对索引内容进行检索，并将检索结果返回
      * @param kw 待检索的关键词
      * @return 检索得到的文档列表
      */
     public List<Document> queryByKw(String kw) throws Exception{
-        //打开准实时索引Reader
-        DirectoryReader reader = DirectoryReader.open(writer);
-        IndexSearcher searcher = new IndexSearcher(reader);
-        Analyzer analyzer = DEFAULT_ANALYZER.getConstructor().newInstance();
-        QueryParser parser = new QueryParser("TITLE", analyzer);
-        Query query = parser.parse(kw);
-        TopDocs docs =searcher.search(query, 10);
-        ScoreDoc[] hits = docs.scoreDocs;
-        List<Document> results = new ArrayList<>();
-        for (ScoreDoc doc : hits) {
-            results.add(searcher.doc(doc.doc));
+        return queryByKw(kw, 1, 10);
+    }
+
+    public List<Document> queryByKw(String kw, int pageNo, int pageSize) throws Exception{
+        if (StringUtil.isEmpty(kw) || writer == null) {
+            return List.of();
         }
-        return results;
+        int normalizedPageNo = Math.max(pageNo, 1);
+        int normalizedPageSize = Math.max(pageSize, 1);
+        int start = (normalizedPageNo - 1) * normalizedPageSize;
+        int end = normalizedPageNo * normalizedPageSize;
+        try (DirectoryReader reader = DirectoryReader.open(writer);
+             Analyzer analyzer = createAnalyzer()) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            QueryParser parser = new MultiFieldQueryParser(ArticleIdxFields.SEARCH_FIELDS, analyzer);
+            parser.setDefaultOperator(QueryParser.Operator.OR);
+            Query query = parser.parse(QueryParser.escape(kw.trim()));
+            TopDocs docs = searcher.search(query, end);
+            ScoreDoc[] hits = docs.scoreDocs;
+            List<Document> results = new ArrayList<>();
+            for (int i = start; i < end && i < hits.length; i++) {
+                results.add(searcher.doc(hits[i].doc));
+            }
+            return results;
+        }
     }
 
     //TODO 请大家在这里添加更多的检索函数，如针对发表时间的范围检索等，
