@@ -96,6 +96,40 @@ class HybridRetrievalServiceTest {
         );
     }
 
+    @Test
+    void retrieveFallsBackToLexicalWhenSnapshotReportsMissingQdrantCollection() throws Exception {
+        IdxService idxService = mock(IdxService.class);
+        ArticleChunkingService chunkingService = mock(ArticleChunkingService.class);
+        ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<VectorStore> vectorStoreProvider = mock(ObjectProvider.class);
+
+        when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
+                new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("qdrant", ProviderAvailabilityState.DEGRADED, true,
+                        "Qdrant is reachable at http://127.0.0.1:6333, but collection 'news article chunks' does not exist."),
+                true,
+                AiFallbackMode.LEXICAL_ONLY));
+
+        HybridRetrievalService service = new HybridRetrievalService(idxService, chunkingService, providerStatusService, vectorStoreProvider) {
+            @Override
+            protected List<HybridChunkResult> lexicalRetrieve(String question) {
+                return List.of(chunk("doc-1", "chunk-1", "词法标题", "https://lexical", "腾讯新闻", 1, null));
+            }
+        };
+
+        HybridRetrievalResult result = service.retrieve("新闻检索助手", 1, 10);
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getMode()),
+                () -> Assertions.assertEquals(1, result.getResults().size()),
+                () -> Assertions.assertEquals(
+                        "Qdrant is reachable at http://127.0.0.1:6333, but collection 'news article chunks' does not exist.",
+                        result.getDegradedReason())
+        );
+    }
+
     private static HybridChunkResult chunk(String docId,
                                            String chunkId,
                                            String title,
@@ -123,15 +157,10 @@ class HybridRetrievalServiceTest {
         private TimedHybridRetrievalService(AtomicLong lexicalStartedAt, AtomicLong vectorStartedAt) {
             super(mock(IdxService.class),
                     mock(ArticleChunkingService.class),
-                    mock(ProviderStatusService.class),
-                    mock(ObjectProvider.class));
+                    availableProviderStatusService(),
+                    availableVectorStoreProvider());
             this.lexicalStartedAt = lexicalStartedAt;
             this.vectorStartedAt = vectorStartedAt;
-        }
-
-        @Override
-        protected boolean isVectorRetrievalAvailable() {
-            return true;
         }
 
         @Override
@@ -156,6 +185,24 @@ class HybridRetrievalServiceTest {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
             }
+        }
+
+        private static ProviderStatusService availableProviderStatusService() {
+            ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
+            when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
+                    new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                    new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                    new ProviderStatus("qdrant", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                    true,
+                    AiFallbackMode.AI_READY));
+            return providerStatusService;
+        }
+
+        @SuppressWarnings("unchecked")
+        private static ObjectProvider<VectorStore> availableVectorStoreProvider() {
+            ObjectProvider<VectorStore> vectorStoreProvider = mock(ObjectProvider.class);
+            when(vectorStoreProvider.getIfAvailable()).thenReturn(mock(VectorStore.class));
+            return vectorStoreProvider;
         }
     }
 }

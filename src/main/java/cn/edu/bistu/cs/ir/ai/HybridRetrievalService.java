@@ -75,8 +75,9 @@ public class HybridRetrievalService {
         List<HybridChunkResult> vectorResults = List.of();
         String mode = MODE_LEXICAL_ONLY;
         String degradedReason = null;
+        VectorRetrievalAvailability vectorAvailability = vectorRetrievalAvailability();
 
-        if (isVectorRetrievalAvailable()) {
+        if (vectorAvailability.available()) {
             CompletableFuture<List<HybridChunkResult>> lexicalFuture = CompletableFuture.supplyAsync(
                     () -> lexicalRetrieve(normalizedQuestion));
             CompletableFuture<List<HybridChunkResult>> vectorFuture = CompletableFuture.supplyAsync(
@@ -94,7 +95,7 @@ public class HybridRetrievalService {
         }
         else {
             lexicalResults = lexicalRetrieve(normalizedQuestion);
-            degradedReason = vectorUnavailableReason();
+            degradedReason = vectorAvailability.reason();
         }
 
         List<HybridChunkResult> fusedResults = fuse(lexicalResults, vectorResults);
@@ -115,39 +116,33 @@ public class HybridRetrievalService {
     }
 
     protected boolean isVectorRetrievalAvailable() {
-        ProviderStatusSnapshot snapshot = providerStatusService.snapshot();
-        VectorStore vectorStore;
-        try {
-            vectorStore = vectorStoreProvider.getIfAvailable();
-        }
-        catch (RuntimeException e) {
-            log.warn(resolveFailureMessage(e, "向量检索初始化失败，已退化为词法检索"), e);
-            return false;
-        }
-        return vectorStore != null
-                && snapshot.ollamaEmbedding().state() == ProviderAvailabilityState.AVAILABLE
-                && snapshot.qdrant().state() == ProviderAvailabilityState.AVAILABLE;
+        return vectorRetrievalAvailability().available();
     }
 
     protected String vectorUnavailableReason() {
+        return vectorRetrievalAvailability().reason();
+    }
+
+    private VectorRetrievalAvailability vectorRetrievalAvailability() {
         ProviderStatusSnapshot snapshot = providerStatusService.snapshot();
+        if (snapshot.ollamaEmbedding().state() != ProviderAvailabilityState.AVAILABLE) {
+            return VectorRetrievalAvailability.unavailableBecause(snapshot.ollamaEmbedding().detail());
+        }
+        if (snapshot.qdrant().state() != ProviderAvailabilityState.AVAILABLE) {
+            return VectorRetrievalAvailability.unavailableBecause(snapshot.qdrant().detail());
+        }
         VectorStore vectorStore;
         try {
             vectorStore = vectorStoreProvider.getIfAvailable();
         }
         catch (RuntimeException e) {
-            return resolveFailureMessage(e, "向量检索初始化失败，已退化为词法检索");
+            return VectorRetrievalAvailability.unavailableBecause(
+                    resolveFailureMessage(e, "向量检索初始化失败，已退化为词法检索"));
         }
         if (vectorStore == null) {
-            return "向量检索未启用或EmbeddingModel/Qdrant VectorStore不可用";
+            return VectorRetrievalAvailability.unavailableBecause("向量检索未启用或EmbeddingModel/Qdrant VectorStore不可用");
         }
-        if (snapshot.ollamaEmbedding().state() != ProviderAvailabilityState.AVAILABLE) {
-            return snapshot.ollamaEmbedding().detail();
-        }
-        if (snapshot.qdrant().state() != ProviderAvailabilityState.AVAILABLE) {
-            return snapshot.qdrant().detail();
-        }
-        return "向量检索不可用，已退化为词法检索";
+        return VectorRetrievalAvailability.availableNow();
     }
 
     protected List<HybridChunkResult> lexicalRetrieve(String question) {
@@ -439,6 +434,17 @@ public class HybridRetrievalService {
 
     private String nullSafe(String value) {
         return value == null ? "" : value;
+    }
+
+    private record VectorRetrievalAvailability(boolean available, String reason) {
+
+        private static VectorRetrievalAvailability availableNow() {
+            return new VectorRetrievalAvailability(true, null);
+        }
+
+        private static VectorRetrievalAvailability unavailableBecause(String reason) {
+            return new VectorRetrievalAvailability(false, reason);
+        }
     }
 
     private record LexicalChunkCandidate(Article article,
