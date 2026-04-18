@@ -28,7 +28,7 @@ public class LucenePipeline implements Pipeline {
 
     private final IngestionObservabilityService ingestionObservabilityService;
 
-    private final String categoryName;
+    private final String runId;
 
     public LucenePipeline(IdxService idxService,
                           ArticleChunkVectorSyncService articleChunkVectorSyncService){
@@ -38,12 +38,12 @@ public class LucenePipeline implements Pipeline {
     public LucenePipeline(IdxService idxService,
                           ArticleChunkVectorSyncService articleChunkVectorSyncService,
                           IngestionObservabilityService ingestionObservabilityService,
-                          String categoryName){
+                          String runId){
         log.info("初始化LucenePipeline模块");
         this.idxService = idxService;
         this.articleChunkVectorSyncService = articleChunkVectorSyncService;
         this.ingestionObservabilityService = ingestionObservabilityService;
-        this.categoryName = categoryName;
+        this.runId = runId;
     }
 
     @Override
@@ -68,14 +68,14 @@ public class LucenePipeline implements Pipeline {
     }
 
     private void recordIndexSuccess(Blog blog) {
-        if (ingestionObservabilityService != null && categoryName != null) {
-            ingestionObservabilityService.recordIndexSuccess(categoryName, blog);
+        if (ingestionObservabilityService != null && runId != null) {
+            ingestionObservabilityService.recordIndexSuccess(runId, blog);
         }
     }
 
     private void recordIndexFailure(String detail, Blog blog) {
-        if (ingestionObservabilityService != null && categoryName != null) {
-            ingestionObservabilityService.recordIndexFailure(categoryName, detail, blog);
+        if (ingestionObservabilityService != null && runId != null) {
+            ingestionObservabilityService.recordIndexFailure(runId, detail, blog);
         }
     }
 

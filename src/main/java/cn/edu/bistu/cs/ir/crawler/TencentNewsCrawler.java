@@ -66,7 +66,7 @@ public class TencentNewsCrawler implements PageProcessor {
 
     private final IngestionObservabilityService ingestionObservabilityService;
 
-    private final String categoryName;
+    private final String runId;
 
     private final Set<String> scheduledArticleUrls = ConcurrentHashMap.newKeySet();
 
@@ -78,13 +78,13 @@ public class TencentNewsCrawler implements PageProcessor {
                               String source,
                               int maxArticleTargets,
                               IngestionObservabilityService ingestionObservabilityService,
-                              String categoryName) {
+                              String runId) {
         this.site = site;
         this.source = StringUtil.isEmpty(source) ? "tencent-news" : source.trim();
         this.maxArticleTargets = maxArticleTargets <= 0 ? 1 : maxArticleTargets;
         this.httpUtils = new HttpUtils();
         this.ingestionObservabilityService = ingestionObservabilityService;
-        this.categoryName = categoryName;
+        this.runId = runId;
     }
 
     @Override
@@ -437,10 +437,10 @@ public class TencentNewsCrawler implements PageProcessor {
     }
 
     private void recordSemanticFailure(String detail) {
-        if (ingestionObservabilityService == null || StringUtil.isEmpty(categoryName)) {
+        if (ingestionObservabilityService == null || StringUtil.isEmpty(runId)) {
             return;
         }
-        ingestionObservabilityService.recordSemanticFailure(categoryName, detail);
+        ingestionObservabilityService.recordSemanticFailure(runId, detail);
     }
 
     @Override

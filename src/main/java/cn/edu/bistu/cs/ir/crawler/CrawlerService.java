@@ -23,6 +23,7 @@ import us.codecraft.webmagic.pipeline.JsonFilePipeline;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static us.codecraft.webmagic.Spider.Status.Stopped;
@@ -60,9 +61,9 @@ public class CrawlerService{
 
     private Spider spider = null;
 
-    private String cnBlogRunCategory;
+    private String cnBlogRunId;
 
-    private final Map<String, Spider> tencentSpiders = new ConcurrentHashMap<>();
+    private final Map<String, TencentSpiderRun> tencentSpiders = new ConcurrentHashMap<>();
 
 
     /**
@@ -86,15 +87,15 @@ public class CrawlerService{
                 .setSleepTime(config.getSleepTime())
                 .setUserAgent(config.getAgent());
         String categoryName = "cnblogs:" + blogger.trim();
+        String runId = startRunObservation(categoryName, blogger, 1, 0);
         this.spider = Spider.create(new CnBlogsCrawler(site, blogger));
-        spider.setSpiderListeners(List.of(new CategorySpiderListener(categoryName)));
-        spider.setDownloader(new ObservedDownloader(categoryName));
-        spider.addPipeline(new LucenePipeline(idxService, articleChunkVectorSyncService, ingestionObservabilityService, categoryName));
+        spider.setSpiderListeners(List.of(new CategorySpiderListener(runId, categoryName)));
+        spider.setDownloader(new ObservedDownloader(runId));
+        spider.addPipeline(new LucenePipeline(idxService, articleChunkVectorSyncService, ingestionObservabilityService, runId));
         spider.addPipeline(new JsonFilePipeline(config.getCrawler()));
         spider.thread(1);
         spider.addUrl(startPage);
-        cnBlogRunCategory = categoryName;
-        startRunObservation(categoryName, blogger, 1, 0);
+        cnBlogRunId = runId;
         spider.runAsync();
         log.info("启动面向博客园的爬虫，抓取博主ID为[{}]的作者的文章", blogger);
     }
@@ -150,17 +151,17 @@ public class CrawlerService{
                 .setRetryTimes(config.getRetryTimes())
                 .setSleepTime(config.getSleepTime())
                 .setUserAgent(config.getAgent());
-        Spider tencentSpider = Spider.create(new TencentNewsCrawler(site, source, maxArticles, ingestionObservabilityService, categoryName));
-        tencentSpider.setSpiderListeners(List.of(new CategorySpiderListener(categoryName)));
-        tencentSpider.setDownloader(new ObservedDownloader(categoryName));
-        tencentSpider.addPipeline(new LucenePipeline(idxService, articleChunkVectorSyncService, ingestionObservabilityService, categoryName));
+        String runId = startRunObservation(categoryName, source, seedUrls.size(), maxArticles);
+        Spider tencentSpider = Spider.create(new TencentNewsCrawler(site, source, maxArticles, ingestionObservabilityService, runId));
+        tencentSpider.setSpiderListeners(List.of(new CategorySpiderListener(runId, categoryName)));
+        tencentSpider.setDownloader(new ObservedDownloader(runId));
+        tencentSpider.addPipeline(new LucenePipeline(idxService, articleChunkVectorSyncService, ingestionObservabilityService, runId));
         tencentSpider.addPipeline(new JsonFilePipeline(config.getCrawler()));
         tencentSpider.thread(1);
         tencentSpider.addUrl(seedUrls.toArray(new String[0]));
         synchronized (tencentSpiders) {
-            tencentSpiders.put(categoryName, tencentSpider);
+            tencentSpiders.put(runId, new TencentSpiderRun(tencentSpider));
         }
-        startRunObservation(categoryName, source, seedUrls.size(), maxArticles);
         tencentSpider.runAsync();
         log.info("启动面向腾讯新闻分类[{}]的爬虫，种子地址数量为[{}]，最大抓取文章数为[{}]", categoryName, seedUrls.size(), maxArticles);
         return true;
@@ -225,46 +226,50 @@ public class CrawlerService{
         return "tencent-news";
     }
 
-    private void startRunObservation(String categoryName, String source, int seedUrlCount, int maxArticles) {
+    private String startRunObservation(String categoryName, String source, int seedUrlCount, int maxArticles) {
         if (ingestionObservabilityService != null) {
-            ingestionObservabilityService.startRun(categoryName, source, seedUrlCount, maxArticles);
+            return ingestionObservabilityService.startRun(categoryName, source, seedUrlCount, maxArticles);
         }
+        return UUID.randomUUID().toString();
     }
 
     private void refreshCnBlogCrawlerStatus() {
         if (this.spider != null && Stopped.equals(this.spider.getStatus())) {
-            if (cnBlogRunCategory != null && ingestionObservabilityService != null) {
-                ingestionObservabilityService.markStopped(cnBlogRunCategory);
+            if (cnBlogRunId != null && ingestionObservabilityService != null) {
+                ingestionObservabilityService.markStopped(cnBlogRunId);
             }
             this.spider = null;
-            this.cnBlogRunCategory = null;
+            this.cnBlogRunId = null;
         }
     }
 
     private void refreshTencentCrawlerStatuses() {
-        List<String> stoppedCategories = new ArrayList<>();
+        List<String> stoppedRunIds = new ArrayList<>();
         synchronized (tencentSpiders) {
-            for (Map.Entry<String, Spider> entry : tencentSpiders.entrySet()) {
-                if (Stopped.equals(entry.getValue().getStatus())) {
-                    stoppedCategories.add(entry.getKey());
+            for (Map.Entry<String, TencentSpiderRun> entry : tencentSpiders.entrySet()) {
+                if (Stopped.equals(entry.getValue().spider().getStatus())) {
+                    stoppedRunIds.add(entry.getKey());
                 }
             }
-            for (String stoppedCategory : stoppedCategories) {
-                tencentSpiders.remove(stoppedCategory);
+            for (String stoppedRunId : stoppedRunIds) {
+                tencentSpiders.remove(stoppedRunId);
             }
         }
         if (ingestionObservabilityService != null) {
-            for (String stoppedCategory : stoppedCategories) {
-                ingestionObservabilityService.markStopped(stoppedCategory);
+            for (String stoppedRunId : stoppedRunIds) {
+                ingestionObservabilityService.markStopped(stoppedRunId);
             }
         }
     }
 
     private final class CategorySpiderListener implements us.codecraft.webmagic.SpiderListener {
 
+        private final String runId;
+
         private final String categoryName;
 
-        private CategorySpiderListener(String categoryName) {
+        private CategorySpiderListener(String runId, String categoryName) {
+            this.runId = runId;
             this.categoryName = categoryName;
         }
 
@@ -276,7 +281,7 @@ public class CrawlerService{
         public void onError(us.codecraft.webmagic.Request request, Exception e) {
             if (ingestionObservabilityService != null) {
                 String detail = e == null ? "crawl request failed" : e.getMessage();
-                ingestionObservabilityService.recordRequestFailure(categoryName, detail);
+                ingestionObservabilityService.recordRequestFailure(runId, detail);
             }
             log.warn("分类[{}]抓取请求失败，url=[{}]", categoryName, request == null ? null : request.getUrl(), e);
         }
@@ -286,10 +291,10 @@ public class CrawlerService{
 
         private final HttpClientDownloader delegate = new HttpClientDownloader();
 
-        private final String categoryName;
+        private final String runId;
 
-        private ObservedDownloader(String categoryName) {
-            this.categoryName = categoryName;
+        private ObservedDownloader(String runId) {
+            this.runId = runId;
         }
 
         @Override
@@ -304,7 +309,7 @@ public class CrawlerService{
             }
             if (page != null && page.isDownloadSuccess()) {
                 if (ingestionObservabilityService != null) {
-                    ingestionObservabilityService.recordRequestSuccess(categoryName);
+                    ingestionObservabilityService.recordRequestSuccess(runId);
                 }
                 return page;
             }
@@ -325,7 +330,10 @@ public class CrawlerService{
             String message = detail == null || detail.isBlank()
                     ? String.format("crawl download failed for [%s]", url)
                     : String.format("crawl download failed for [%s]: %s", url, detail);
-            ingestionObservabilityService.recordRequestFailure(categoryName, message);
+            ingestionObservabilityService.recordRequestFailure(runId, message);
         }
+    }
+
+    private record TencentSpiderRun(Spider spider) {
     }
 }
