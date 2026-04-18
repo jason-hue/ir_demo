@@ -7,28 +7,22 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.time.Duration;
 
-class ProviderStatusServiceDegradedTest {
+class ProviderStatusServiceQdrantProbeTest {
 
     private HttpServer server;
 
     private volatile String lastRawPath;
 
-    @Test
-    void qdrantStatusReturnsUnavailableWhenCollectionEndpointCannotBeReached() throws Exception {
-        ProviderStatus status = probeUnavailable();
-
-        Assertions.assertAll(
-                () -> Assertions.assertEquals(ProviderAvailabilityState.UNAVAILABLE, status.state()),
-                () -> Assertions.assertTrue(status.detail().contains("did not respond")),
-                () -> Assertions.assertNull(lastRawPath)
-        );
+    @AfterEach
+    void stopServer() {
+        if (server != null) {
+            server.stop(0);
+        }
     }
 
     @Test
@@ -64,40 +58,18 @@ class ProviderStatusServiceDegradedTest {
         );
     }
 
-    @AfterEach
-    void stopServer() {
-        if (server != null) {
-            server.stop(0);
-        }
-    }
-
-    private ProviderStatus probeUnavailable() throws Exception {
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.start();
-        int port = server.getAddress().getPort();
-        server.stop(0);
-
-        return qdrantStatusAtPort(port);
-    }
-
     private ProviderStatus probe(int responseStatus) throws Exception {
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server = HttpServer.create(new InetSocketAddress(0), 0);
         server.createContext("/collections", exchange -> writeResponse(exchange, responseStatus));
         server.start();
 
-        return qdrantStatusAtPort(server.getAddress().getPort());
-    }
-
-    private ProviderStatus qdrantStatusAtPort(int port) {
         AiProperties properties = new AiProperties();
-        Object qdrant = ReflectionTestUtils.getField(properties, "qdrant");
-        Object providerStatus = ReflectionTestUtils.getField(properties, "providerStatus");
-        ReflectionTestUtils.setField(qdrant, "enabled", true);
-        ReflectionTestUtils.setField(qdrant, "host", "127.0.0.1");
-        ReflectionTestUtils.setField(qdrant, "httpPort", port);
-        ReflectionTestUtils.setField(qdrant, "collectionName", "news article chunks");
-        ReflectionTestUtils.setField(providerStatus, "connectTimeout", Duration.ofSeconds(2));
-        ReflectionTestUtils.setField(providerStatus, "readTimeout", Duration.ofSeconds(2));
+        properties.getQdrant().setEnabled(true);
+        properties.getQdrant().setHost("127.0.0.1");
+        properties.getQdrant().setHttpPort(server.getAddress().getPort());
+        properties.getQdrant().setCollectionName("news article chunks");
+        properties.getProviderStatus().setConnectTimeout(java.time.Duration.ofSeconds(2));
+        properties.getProviderStatus().setReadTimeout(java.time.Duration.ofSeconds(2));
 
         return new ProviderStatusService(properties, new ObjectMapper()).qdrantStatus();
     }

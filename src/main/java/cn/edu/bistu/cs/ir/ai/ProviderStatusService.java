@@ -1,6 +1,5 @@
 package cn.edu.bistu.cs.ir.ai;
 
-import cn.edu.bistu.cs.ir.config.AiProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -12,10 +11,12 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 
 @Service
@@ -23,20 +24,20 @@ public class ProviderStatusService {
 
     private static final Logger log = LoggerFactory.getLogger(ProviderStatusService.class);
 
-    private final AiProperties aiProperties;
+    private final cn.edu.bistu.cs.ir.config.AiProperties aiProperties;
 
     private final ObjectMapper objectMapper;
 
     private final ObjectProvider<OllamaWarmupService> ollamaWarmupServiceProvider;
 
-    public ProviderStatusService(AiProperties aiProperties, ObjectMapper objectMapper) {
+    public ProviderStatusService(cn.edu.bistu.cs.ir.config.AiProperties aiProperties, ObjectMapper objectMapper) {
         this(aiProperties, objectMapper, null);
     }
 
     @Autowired
-    public ProviderStatusService(AiProperties aiProperties,
-                                 ObjectMapper objectMapper,
-                                 ObjectProvider<OllamaWarmupService> ollamaWarmupServiceProvider) {
+    public ProviderStatusService(cn.edu.bistu.cs.ir.config.AiProperties aiProperties,
+                                  ObjectMapper objectMapper,
+                                  ObjectProvider<OllamaWarmupService> ollamaWarmupServiceProvider) {
         this.aiProperties = aiProperties;
         this.objectMapper = objectMapper;
         this.ollamaWarmupServiceProvider = ollamaWarmupServiceProvider;
@@ -101,19 +102,25 @@ public class ProviderStatusService {
 
         String baseUrl = (aiProperties.getQdrant().isUseTls() ? "https" : "http") + "://"
                 + aiProperties.getQdrant().getHost() + ":" + aiProperties.getQdrant().getHttpPort();
-        HttpResponse<String> response = httpGet(baseUrl + "/collections");
+        String collectionName = aiProperties.getQdrant().getCollectionName();
+        HttpResponse<String> response = httpGet(baseUrl + "/collections/" + encodePathSegment(collectionName));
         if (response == null) {
             return new ProviderStatus("qdrant", ProviderAvailabilityState.UNAVAILABLE, true,
-                    "Qdrant did not respond at " + baseUrl);
+                    "Qdrant did not respond at " + baseUrl + " while checking collection '" + collectionName + "'.");
         }
 
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
             return new ProviderStatus("qdrant", ProviderAvailabilityState.AVAILABLE, true,
-                    "Qdrant is reachable for collection '" + aiProperties.getQdrant().getCollectionName() + "'.");
+                    "Qdrant collection '" + collectionName + "' is available at " + baseUrl + ".");
+        }
+
+        if (response.statusCode() == 404) {
+            return new ProviderStatus("qdrant", ProviderAvailabilityState.DEGRADED, true,
+                    "Qdrant is reachable at " + baseUrl + ", but collection '" + collectionName + "' does not exist.");
         }
 
         return new ProviderStatus("qdrant", ProviderAvailabilityState.DEGRADED, true,
-                "Qdrant probe returned HTTP " + response.statusCode());
+                "Qdrant is reachable at " + baseUrl + ", but collection '" + collectionName + "' probe returned HTTP " + response.statusCode() + ".");
     }
 
     private boolean isAiReady(ProviderStatus ollamaChat, ProviderStatus ollamaEmbedding, ProviderStatus qdrant) {
@@ -150,6 +157,10 @@ public class ProviderStatusService {
             return baseUrl.substring(0, baseUrl.length() - 1);
         }
         return baseUrl;
+    }
+
+    private String encodePathSegment(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     private ProviderStatus applyWarmupReadiness(ProviderStatus ollamaChat) {
