@@ -22,6 +22,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
@@ -74,37 +75,35 @@ class ProductionStatusEndpointTest {
 
     @Test
     void productionStatusMarksForcedDownloadFailureAsFailedInsteadOfNoNewData() throws Exception {
+        String firstSource = "broken-source-a";
+        String secondSource = "broken-source-b";
         crawlerService.startTencentNewsCrawler(
                 java.util.List.of("http://127.0.0.1:9/boom"),
-                "broken-source",
+                firstSource,
+                1);
+        Thread.sleep(25L);
+        crawlerService.startTencentNewsCrawler(
+                java.util.List.of("http://127.0.0.1:9/boom"),
+                secondSource,
                 1);
 
-        IngestionStatusSnapshot.CategoryRunStatus brokenStatus = null;
-        for (int i = 0; i < 80; i++) {
-            ResponseEntity<QueryResponse<ProductionStatusSnapshot>> response = restTemplate.exchange(
-                    "/status/production",
-                    HttpMethod.GET,
-                    null,
-                    new ParameterizedTypeReference<>() {
-                    });
-            Assertions.assertEquals(HttpStatus.OK, response.getStatusCode());
-            QueryResponse<ProductionStatusSnapshot> body = response.getBody();
-            Assertions.assertNotNull(body);
-            Assertions.assertNotNull(body.getData());
-            brokenStatus = body.getData().ingest().categories().stream()
-                    .filter(category -> "adhoc".equals(category.category()))
-                    .findFirst()
-                    .orElse(null);
-            if (brokenStatus != null && brokenStatus.outcome() != IngestionStatusSnapshot.RunOutcome.RUNNING) {
-                break;
-            }
-            Thread.sleep(100L);
-        }
+        List<IngestionStatusSnapshot.CategoryRunStatus> brokenStatuses = awaitCategoryStatuses(
+                "adhoc",
+                List.of(firstSource, secondSource));
 
-        Assertions.assertNotNull(brokenStatus);
-        Assertions.assertEquals(IngestionStatusSnapshot.RunOutcome.FAILED, brokenStatus.outcome());
-        Assertions.assertTrue(brokenStatus.requestFailureCount() > 0);
-        Assertions.assertEquals(0, brokenStatus.indexedDocumentCount());
+        Assertions.assertEquals(2, brokenStatuses.size());
+        Assertions.assertEquals(
+                List.of(secondSource, firstSource),
+                brokenStatuses.stream().map(IngestionStatusSnapshot.CategoryRunStatus::source).toList());
+        Assertions.assertNotEquals(brokenStatuses.get(0).runId(), brokenStatuses.get(1).runId());
+        for (IngestionStatusSnapshot.CategoryRunStatus brokenStatus : brokenStatuses) {
+            Assertions.assertEquals("adhoc", brokenStatus.category());
+            Assertions.assertEquals(IngestionStatusSnapshot.RunOutcome.FAILED, brokenStatus.outcome());
+            Assertions.assertTrue(brokenStatus.requestFailureCount() > 0);
+            Assertions.assertEquals(0, brokenStatus.indexedDocumentCount());
+            Assertions.assertNotNull(brokenStatus.runId());
+            Assertions.assertFalse(brokenStatus.runId().isBlank());
+        }
     }
 
     @Test
@@ -147,7 +146,13 @@ class ProductionStatusEndpointTest {
     }
 
     private IngestionStatusSnapshot.CategoryRunStatus awaitCategoryStatus(String categoryName, String source) throws Exception {
-        IngestionStatusSnapshot.CategoryRunStatus status = null;
+        List<IngestionStatusSnapshot.CategoryRunStatus> statuses = awaitCategoryStatuses(categoryName, List.of(source));
+        return statuses.isEmpty() ? null : statuses.getFirst();
+    }
+
+    private List<IngestionStatusSnapshot.CategoryRunStatus> awaitCategoryStatuses(String categoryName,
+                                                                                  List<String> sources) throws Exception {
+        List<IngestionStatusSnapshot.CategoryRunStatus> statuses = List.of();
         for (int i = 0; i < 80; i++) {
             ResponseEntity<QueryResponse<ProductionStatusSnapshot>> response = restTemplate.exchange(
                     "/status/production",
@@ -159,16 +164,16 @@ class ProductionStatusEndpointTest {
             QueryResponse<ProductionStatusSnapshot> body = response.getBody();
             Assertions.assertNotNull(body);
             Assertions.assertNotNull(body.getData());
-            status = body.getData().ingest().categories().stream()
-                    .filter(candidate -> categoryName.equals(candidate.category()) && source.equals(candidate.source()))
-                    .findFirst()
-                    .orElse(null);
-            if (status != null && status.outcome() != IngestionStatusSnapshot.RunOutcome.RUNNING) {
-                return status;
+            statuses = body.getData().ingest().categories().stream()
+                    .filter(candidate -> categoryName.equals(candidate.category()) && sources.contains(candidate.source()))
+                    .toList();
+            if (statuses.size() == sources.size()
+                    && statuses.stream().allMatch(status -> status.outcome() != IngestionStatusSnapshot.RunOutcome.RUNNING)) {
+                return statuses;
             }
             Thread.sleep(100L);
         }
-        return status;
+        return statuses;
     }
 
     private String readFixture(String path) throws IOException {

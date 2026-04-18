@@ -19,6 +19,7 @@ public record IngestionStatusSnapshot(
     public record CategoryRunStatus(
             String category,
             String source,
+            String runId,
             RunOutcome outcome,
             Instant startedAt,
             Instant finishedAt,
