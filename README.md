@@ -33,6 +33,19 @@
 - `docker-compose.local.yml`：本地 Qdrant
 - `workspace/`：运行期目录（索引、爬虫输出等，自动生成）
 
+如果你在 `ir_demo/` 里遇到类似下面的错误：
+
+```text
+copying .../src/main/resources/application-demo.properties to .../target/classes/application-demo.properties failed
+```
+
+通常不是代码问题，而是 `target/` 权限问题。最干净的修复方式是删除生成物目录后重建：
+
+```bash
+sudo rm -rf /path/to/ir_demo/target
+mvn -DskipTests package
+```
+
 ---
 
 ## 3. 新手完整部署教程（从克隆到可聊天）
@@ -266,6 +279,8 @@ mvn test
 ```bash
 mvn -DskipTests package
 ```
+
+如果你在主目录执行这条命令时失败，并且报错指向 `target/classes/...` 无法覆盖，请优先检查是不是 `target/` 权限污染，而不是直接怀疑源码差异。
 
 ### 仅运行关键 smoke 测试
 
