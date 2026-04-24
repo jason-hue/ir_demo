@@ -1,5 +1,6 @@
 package cn.edu.bistu.cs.ir.ai;
 
+import cn.edu.bistu.cs.ir.config.AiProperties;
 import cn.edu.bistu.cs.ir.index.IdxService;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -9,6 +10,13 @@ import org.springframework.beans.factory.ObjectProvider;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.mockito.Mockito.mock;
@@ -40,7 +48,8 @@ class HybridRetrievalServiceTest {
                 mock(IdxService.class),
                 mock(ArticleChunkingService.class),
                 mock(ProviderStatusService.class),
-                mock(ObjectProvider.class));
+                mock(ObjectProvider.class),
+                aiProperties(Duration.ofSeconds(120)));
 
         HybridChunkResult lexicalPrimary = chunk("doc-1", "chunk-1", "词法标题", null, null, 1, null);
         lexicalPrimary.setChunkText("词法片段");
@@ -80,7 +89,11 @@ class HybridRetrievalServiceTest {
                 AiFallbackMode.AI_READY));
         when(vectorStoreProvider.getIfAvailable()).thenThrow(new IllegalStateException("vector store init boom"));
 
-        HybridRetrievalService service = new HybridRetrievalService(idxService, chunkingService, providerStatusService, vectorStoreProvider) {
+        HybridRetrievalService service = new HybridRetrievalService(idxService,
+                chunkingService,
+                providerStatusService,
+                vectorStoreProvider,
+                aiProperties(Duration.ofSeconds(120))) {
             @Override
             protected List<HybridChunkResult> lexicalRetrieve(String question) {
                 return List.of(chunk("doc-1", "chunk-1", "词法标题", "https://lexical", "腾讯新闻", 1, null));
@@ -112,7 +125,11 @@ class HybridRetrievalServiceTest {
                 true,
                 AiFallbackMode.LEXICAL_ONLY));
 
-        HybridRetrievalService service = new HybridRetrievalService(idxService, chunkingService, providerStatusService, vectorStoreProvider) {
+        HybridRetrievalService service = new HybridRetrievalService(idxService,
+                chunkingService,
+                providerStatusService,
+                vectorStoreProvider,
+                aiProperties(Duration.ofSeconds(120))) {
             @Override
             protected List<HybridChunkResult> lexicalRetrieve(String question) {
                 return List.of(chunk("doc-1", "chunk-1", "词法标题", "https://lexical", "腾讯新闻", 1, null));
@@ -128,6 +145,97 @@ class HybridRetrievalServiceTest {
                         "Qdrant is reachable at http://127.0.0.1:6333, but collection 'news article chunks' does not exist.",
                         result.getDegradedReason())
         );
+    }
+
+    @Test
+    void retrieveDegradesToLexicalOnlyWhenVectorRetrievalExceedsTimeoutBudget() throws Exception {
+        HybridRetrievalService service = new BlockingVectorHybridRetrievalService(Duration.ZERO, Duration.ofMillis(100));
+
+        HybridRetrievalResult result = retrieveWithinBudget(service, "新闻检索助手", Duration.ofMillis(250));
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getMode()),
+                () -> Assertions.assertFalse(result.getResults().isEmpty()),
+                () -> Assertions.assertEquals("chunk-lexical", result.getResults().getFirst().getChunkId()),
+                () -> Assertions.assertEquals(Integer.valueOf(1), result.getResults().getFirst().getLexicalRank()),
+                () -> Assertions.assertNull(result.getResults().getFirst().getVectorRank()),
+                () -> Assertions.assertNotNull(result.getResults().getFirst().getSourceUrl()),
+                () -> Assertions.assertNotNull(result.getDegradedReason()),
+                () -> Assertions.assertTrue(result.getDegradedReason().contains("超时"),
+                        "degraded reason should be machine-checkable for timeout handling")
+        );
+    }
+
+    @Test
+    void retrieveUsesOneEndToEndBudgetInsteadOfAddingFreshVectorTimeoutAfterSlowLexical() throws Exception {
+        HybridRetrievalService service = new BlockingVectorHybridRetrievalService(Duration.ofMillis(150), Duration.ofMillis(200));
+
+        Instant started = Instant.now();
+        HybridRetrievalResult result = retrieveWithinBudget(service, "新闻检索助手", Duration.ofMillis(320));
+        long elapsedMillis = Duration.between(started, Instant.now()).toMillis();
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getMode()),
+                () -> Assertions.assertFalse(result.getResults().isEmpty()),
+                () -> Assertions.assertEquals("chunk-lexical", result.getResults().getFirst().getChunkId()),
+                () -> Assertions.assertTrue(result.getDegradedReason().contains("超时")),
+                () -> Assertions.assertTrue(result.getDegradedReason().contains("200毫秒")),
+                () -> Assertions.assertTrue(elapsedMillis < 320,
+                        "retrieve should honor one end-to-end vector budget instead of lexical latency plus a fresh timeout")
+        );
+    }
+
+    @Test
+    void retrieveReturnsBeforeConfiguredTimeoutWallWhenVectorPathTimesOut() throws Exception {
+        HybridRetrievalService service = new BlockingVectorHybridRetrievalService(Duration.ZERO, Duration.ofMillis(200));
+
+        Instant started = Instant.now();
+        HybridRetrievalResult result = retrieveWithinBudget(service, "新闻检索助手", Duration.ofMillis(260));
+        long elapsedMillis = Duration.between(started, Instant.now()).toMillis();
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getMode()),
+                () -> Assertions.assertTrue(result.getDegradedReason().contains("超时")),
+                () -> Assertions.assertTrue(elapsedMillis < 190,
+                        "retrieve should leave a small cushion before the configured timeout wall")
+        );
+    }
+
+    @Test
+    void retrieveUsesTwoSecondGuardBandForProductionSizedTimeouts() {
+        HybridRetrievalService service = new HybridRetrievalService(
+                mock(IdxService.class),
+                mock(ArticleChunkingService.class),
+                mock(ProviderStatusService.class),
+                mock(ObjectProvider.class),
+                aiProperties(Duration.ofSeconds(120)));
+
+        Assertions.assertEquals(TimeUnit.SECONDS.toNanos(2), service.vectorTimeoutGuardBandNanos());
+    }
+
+    private HybridRetrievalResult retrieveWithinBudget(HybridRetrievalService service,
+                                                       String question,
+                                                       Duration timeout) throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor(new DaemonThreadFactory());
+        Future<HybridRetrievalResult> future = executor.submit(() -> service.retrieve(question, 1, 10));
+        try {
+            return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        }
+        catch (TimeoutException e) {
+            future.cancel(true);
+            Assertions.fail("retrieve should degrade to lexical-only within the timeout budget instead of hanging forever", e);
+            throw e;
+        }
+        catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception exception) {
+                throw exception;
+            }
+            throw new RuntimeException(cause);
+        }
+        finally {
+            executor.shutdownNow();
+        }
     }
 
     private static HybridChunkResult chunk(String docId,
@@ -158,7 +266,8 @@ class HybridRetrievalServiceTest {
             super(mock(IdxService.class),
                     mock(ArticleChunkingService.class),
                     availableProviderStatusService(),
-                    availableVectorStoreProvider());
+                    availableVectorStoreProvider(),
+                    aiProperties(Duration.ofSeconds(120)));
             this.lexicalStartedAt = lexicalStartedAt;
             this.vectorStartedAt = vectorStartedAt;
         }
@@ -203,6 +312,68 @@ class HybridRetrievalServiceTest {
             ObjectProvider<VectorStore> vectorStoreProvider = mock(ObjectProvider.class);
             when(vectorStoreProvider.getIfAvailable()).thenReturn(mock(VectorStore.class));
             return vectorStoreProvider;
+        }
+    }
+
+    private static class BlockingVectorHybridRetrievalService extends HybridRetrievalService {
+
+        private final Duration lexicalDelay;
+
+        private final Duration vectorTimeout;
+
+        private BlockingVectorHybridRetrievalService(Duration lexicalDelay, Duration vectorTimeout) {
+            super(mock(IdxService.class),
+                    mock(ArticleChunkingService.class),
+                    TimedHybridRetrievalService.availableProviderStatusService(),
+                    TimedHybridRetrievalService.availableVectorStoreProvider(),
+                    aiProperties(vectorTimeout));
+            this.lexicalDelay = lexicalDelay;
+            this.vectorTimeout = vectorTimeout;
+        }
+
+        @Override
+        protected List<HybridChunkResult> lexicalRetrieve(String question) {
+            sleep(lexicalDelay);
+            return List.of(chunk("doc-lexical", "chunk-lexical", "词法标题", "https://lexical", "腾讯新闻", 1, null));
+        }
+
+        @Override
+        protected List<HybridChunkResult> vectorRetrieve(String question) {
+            sleep(Duration.ofMinutes(5));
+            return List.of(chunk("doc-vector", "chunk-vector", "向量标题", "https://vector", "腾讯新闻", null, 1));
+        }
+
+        @Override
+        protected long vectorRetrievalTimeoutMillis() {
+            return vectorTimeout.toMillis();
+        }
+
+        private void sleep(Duration duration) {
+            if (duration.isZero() || duration.isNegative()) {
+                return;
+            }
+            try {
+                Thread.sleep(duration.toMillis());
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static AiProperties aiProperties(Duration vectorTimeout) {
+        AiProperties aiProperties = new AiProperties();
+        aiProperties.getRetrieval().setVectorTimeout(vectorTimeout);
+        return aiProperties;
+    }
+
+    private static class DaemonThreadFactory implements ThreadFactory {
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "hybrid-retrieval-timeout-test");
+            thread.setDaemon(true);
+            return thread;
         }
     }
 }

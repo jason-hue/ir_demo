@@ -16,6 +16,8 @@ import java.time.Duration;
 
 class ProviderStatusServiceDegradedTest {
 
+    private static final String CONFIG_DISABLED_DETAIL = "Qdrant vector support is disabled by configuration.";
+
     private HttpServer server;
 
     private volatile String lastRawPath;
@@ -28,6 +30,19 @@ class ProviderStatusServiceDegradedTest {
                 () -> Assertions.assertEquals(ProviderAvailabilityState.UNAVAILABLE, status.state()),
                 () -> Assertions.assertTrue(status.detail().contains("did not respond")),
                 () -> Assertions.assertNull(lastRawPath)
+        );
+    }
+
+    @Test
+    void qdrantStatusReturnsDisabledWhenVectorSupportIsDisabledByConfiguration() {
+        AiProperties properties = new AiProperties();
+
+        ProviderStatus status = new ProviderStatusService(properties, new ObjectMapper()).qdrantStatus();
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(ProviderAvailabilityState.DISABLED, status.state()),
+                () -> Assertions.assertFalse(status.enabled()),
+                () -> Assertions.assertEquals(CONFIG_DISABLED_DETAIL, status.detail())
         );
     }
 
@@ -64,6 +79,34 @@ class ProviderStatusServiceDegradedTest {
         );
     }
 
+    @Test
+    void qdrantStatusReturnsMachineCheckableDegradedDetailWhenCollectionProbeTimesOut() throws Exception {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/collections", exchange -> {
+            lastRawPath = exchange.getRequestURI().getRawPath();
+            try {
+                Thread.sleep(250L);
+                writeResponse(exchange, 200);
+            }
+            catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            catch (IOException ignored) {
+            }
+        });
+        server.start();
+
+        ProviderStatus status = qdrantStatusAtPort(server.getAddress().getPort(), Duration.ofMillis(100));
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(ProviderAvailabilityState.DEGRADED, status.state()),
+                () -> Assertions.assertTrue(status.enabled()),
+                () -> Assertions.assertTrue(status.detail().contains("[QDRANT_TIMEOUT]")),
+                () -> Assertions.assertFalse(status.detail().equals(CONFIG_DISABLED_DETAIL)),
+                () -> Assertions.assertEquals("/collections/news%20article%20chunks", lastRawPath)
+        );
+    }
+
     @AfterEach
     void stopServer() {
         if (server != null) {
@@ -89,6 +132,10 @@ class ProviderStatusServiceDegradedTest {
     }
 
     private ProviderStatus qdrantStatusAtPort(int port) {
+        return qdrantStatusAtPort(port, Duration.ofSeconds(2));
+    }
+
+    private ProviderStatus qdrantStatusAtPort(int port, Duration readTimeout) {
         AiProperties properties = new AiProperties();
         Object qdrant = ReflectionTestUtils.getField(properties, "qdrant");
         Object providerStatus = ReflectionTestUtils.getField(properties, "providerStatus");
@@ -97,7 +144,7 @@ class ProviderStatusServiceDegradedTest {
         ReflectionTestUtils.setField(qdrant, "httpPort", port);
         ReflectionTestUtils.setField(qdrant, "collectionName", "news article chunks");
         ReflectionTestUtils.setField(providerStatus, "connectTimeout", Duration.ofSeconds(2));
-        ReflectionTestUtils.setField(providerStatus, "readTimeout", Duration.ofSeconds(2));
+        ReflectionTestUtils.setField(providerStatus, "readTimeout", readTimeout);
 
         return new ProviderStatusService(properties, new ObjectMapper()).qdrantStatus();
     }

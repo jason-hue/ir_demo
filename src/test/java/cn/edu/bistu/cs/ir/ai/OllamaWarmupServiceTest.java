@@ -13,6 +13,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class OllamaWarmupServiceTest {
 
@@ -58,6 +59,33 @@ class OllamaWarmupServiceTest {
                 () -> Assertions.assertFalse(warmed),
                 () -> Assertions.assertFalse(service.isChatReady()),
                 () -> Assertions.assertTrue(service.chatReadinessDetail().contains("预热失败"))
+        );
+    }
+
+    @Test
+    void keepWarmFailureDoesNotClearReadyStateAfterSuccessfulWarmup() throws Exception {
+        server = HttpServer.create(new InetSocketAddress(0), 0);
+        AtomicInteger attempts = new AtomicInteger();
+        server.createContext("/api/generate", exchange -> {
+            if (attempts.incrementAndGet() == 1) {
+                writeJson(exchange, 200, "{\"response\":\"ready\",\"done\":true}");
+                return;
+            }
+            writeJson(exchange, 500, "{\"error\":\"boom\"}");
+        });
+        server.start();
+
+        OllamaWarmupService service = new OllamaWarmupService(aiProperties(server.getAddress().getPort(), Duration.ofSeconds(2)),
+                new ObjectMapper());
+
+        boolean firstWarmup = service.warmUpNow("startup");
+        boolean keepWarm = service.warmUpNow("keep-warm");
+
+        Assertions.assertAll(
+                () -> Assertions.assertTrue(firstWarmup),
+                () -> Assertions.assertFalse(keepWarm),
+                () -> Assertions.assertTrue(service.isChatReady()),
+                () -> Assertions.assertTrue(service.chatReadinessDetail().contains("已预热"))
         );
     }
 
