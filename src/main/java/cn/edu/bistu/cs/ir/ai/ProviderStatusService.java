@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.net.ConnectException;
+import java.net.http.HttpTimeoutException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -23,6 +24,8 @@ import java.util.Iterator;
 public class ProviderStatusService {
 
     private static final Logger log = LoggerFactory.getLogger(ProviderStatusService.class);
+
+    static final String VECTOR_TIMEOUT_DETAIL_PREFIX = "[" + ArticleChunkVectorSyncService.QDRANT_TIMEOUT_CODE + "]";
 
     private final cn.edu.bistu.cs.ir.config.AiProperties aiProperties;
 
@@ -60,7 +63,8 @@ public class ProviderStatusService {
                     "Ollama support is disabled by configuration.");
         }
 
-        HttpResponse<String> response = httpGet(normalizeBaseUrl(aiProperties.getOllama().getBaseUrl()) + "/api/tags");
+        ProbeResult probe = httpGet(normalizeBaseUrl(aiProperties.getOllama().getBaseUrl()) + "/api/tags");
+        HttpResponse<String> response = probe.response();
         if (response == null) {
             return new ProviderStatus(providerName, ProviderAvailabilityState.UNAVAILABLE, true,
                     "Ollama did not respond at " + aiProperties.getOllama().getBaseUrl());
@@ -103,7 +107,15 @@ public class ProviderStatusService {
         String baseUrl = (aiProperties.getQdrant().isUseTls() ? "https" : "http") + "://"
                 + aiProperties.getQdrant().getHost() + ":" + aiProperties.getQdrant().getHttpPort();
         String collectionName = aiProperties.getQdrant().getCollectionName();
-        HttpResponse<String> response = httpGet(baseUrl + "/collections/" + encodePathSegment(collectionName));
+        ProbeResult probe = httpGet(baseUrl + "/collections/" + encodePathSegment(collectionName));
+        if (probe.timedOut()) {
+            return new ProviderStatus("qdrant", ProviderAvailabilityState.DEGRADED, true,
+                    VECTOR_TIMEOUT_DETAIL_PREFIX + " Qdrant collection probe timed out after "
+                            + formatTimeout(aiProperties.getProviderStatus().getReadTimeout())
+                            + " at " + baseUrl + " while checking collection '" + collectionName + "'.");
+        }
+
+        HttpResponse<String> response = probe.response();
         if (response == null) {
             return new ProviderStatus("qdrant", ProviderAvailabilityState.UNAVAILABLE, true,
                     "Qdrant did not respond at " + baseUrl + " while checking collection '" + collectionName + "'.");
@@ -129,7 +141,7 @@ public class ProviderStatusService {
                 && (!qdrant.enabled() || qdrant.state() == ProviderAvailabilityState.AVAILABLE);
     }
 
-    private HttpResponse<String> httpGet(String url) {
+    private ProbeResult httpGet(String url) {
         try {
             Duration connectTimeout = aiProperties.getProviderStatus().getConnectTimeout();
             Duration readTimeout = aiProperties.getProviderStatus().getReadTimeout();
@@ -140,16 +152,28 @@ public class ProviderStatusService {
                     .GET()
                     .timeout(readTimeout)
                     .build();
-            return client.send(request, HttpResponse.BodyHandlers.ofString());
+            return ProbeResult.fromResponse(client.send(request, HttpResponse.BodyHandlers.ofString()));
         }
         catch (ConnectException e) {
             log.debug("Provider probe connection refused for {}", url);
-            return null;
+            return ProbeResult.unavailableProbe();
+        }
+        catch (HttpTimeoutException e) {
+            log.debug("Provider probe timed out for {}", url);
+            return ProbeResult.timeoutProbe();
         }
         catch (Exception e) {
             log.debug("Provider probe failed for {}", url, e);
-            return null;
+            return ProbeResult.unavailableProbe();
         }
+    }
+
+    private String formatTimeout(Duration timeout) {
+        long millis = timeout.toMillis();
+        if (millis % 1000 == 0) {
+            return (millis / 1000) + "秒";
+        }
+        return millis + "毫秒";
     }
 
     private String normalizeBaseUrl(String baseUrl) {
@@ -193,5 +217,20 @@ public class ProviderStatusService {
             }
         }
         return false;
+    }
+
+    private record ProbeResult(HttpResponse<String> response, boolean timedOut) {
+
+        private static ProbeResult fromResponse(HttpResponse<String> response) {
+            return new ProbeResult(response, false);
+        }
+
+        private static ProbeResult unavailableProbe() {
+            return new ProbeResult(null, false);
+        }
+
+        private static ProbeResult timeoutProbe() {
+            return new ProbeResult(null, true);
+        }
     }
 }

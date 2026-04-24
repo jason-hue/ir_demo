@@ -1,5 +1,6 @@
 package cn.edu.bistu.cs.ir.ai;
 
+import com.google.common.util.concurrent.ListenableFuture;
 import cn.edu.bistu.cs.ir.config.AiProperties;
 import cn.edu.bistu.cs.ir.model.Article;
 import cn.edu.bistu.cs.ir.model.ArticleChunkMetadata;
@@ -32,6 +33,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * 将文章分块向量以幂等方式同步到Qdrant。
@@ -40,6 +43,10 @@ import java.util.concurrent.ExecutionException;
 public class ArticleChunkVectorSyncService {
 
     static final String CONTENT_FIELD_NAME = "doc_content";
+
+    static final String QDRANT_TIMEOUT_CODE = "QDRANT_TIMEOUT";
+
+    private static final long VECTOR_SYNC_TIMEOUT_MILLIS = 120_000L;
 
     private static final Logger log = LoggerFactory.getLogger(ArticleChunkVectorSyncService.class);
 
@@ -59,18 +66,26 @@ public class ArticleChunkVectorSyncService {
         this.aiProperties = aiProperties;
     }
 
-    public void syncArticle(Article article) {
+    public SyncResult syncArticle(Article article) {
         if (article == null) {
-            return;
+            return SyncResult.succeeded();
         }
-        article.ensureCanonicalIdentity();
-        List<ArticleChunkEmbedding> embeddings = articleEmbeddingService.generateEmbeddings(article);
-        syncEmbeddings(article, embeddings);
+        try {
+            article.ensureCanonicalIdentity();
+            List<ArticleChunkEmbedding> embeddings = articleEmbeddingService.generateEmbeddings(article);
+            return syncEmbeddings(article, embeddings);
+        }
+        catch (RuntimeException e) {
+            String detail = String.format("文章[%s]分块向量生成失败，保留词法路径: %s",
+                    article.getDocId(), e.getMessage());
+            log.warn(detail);
+            return SyncResult.failed(detail);
+        }
     }
 
-    void syncEmbeddings(Article article, List<ArticleChunkEmbedding> embeddings) {
+    SyncResult syncEmbeddings(Article article, List<ArticleChunkEmbedding> embeddings) {
         if (article == null || embeddings == null) {
-            return;
+            return SyncResult.succeeded();
         }
         article.ensureCanonicalIdentity();
         if (StringUtil.isEmpty(article.getDocId())) {
@@ -79,33 +94,64 @@ public class ArticleChunkVectorSyncService {
 
         QdrantClient qdrantClient = qdrantClientProvider.getIfAvailable();
         if (qdrantClient == null) {
-            return;
+            return SyncResult.succeeded();
         }
 
         try {
             ensureCollectionExistsForRewrite(qdrantClient, embeddings);
-            UpdateResult deleteResult = qdrantClient.deleteAsync(aiProperties.getQdrant().getCollectionName(),
-                    docIdFilter(article.getDocId())).get();
+            UpdateResult deleteResult = waitForQdrantOperation(
+                    qdrantClient.deleteAsync(aiProperties.getQdrant().getCollectionName(),
+                            docIdFilter(article.getDocId())),
+                    "delete",
+                    article.getDocId());
             if (deleteResult.getStatus() != UpdateStatus.Completed) {
-                log.warn("文章[{}]旧分块向量删除未完成，状态为[{}]，跳过重写以避免残留。",
+                String detail = String.format("文章[%s]旧分块向量删除未完成，状态为[%s]，保留词法路径。",
                         article.getDocId(), deleteResult.getStatus());
-                return;
+                log.warn(detail);
+                return SyncResult.failed(detail);
             }
             if (embeddings.isEmpty()) {
-                return;
+                return SyncResult.succeeded();
             }
-            UpdateResult result = qdrantClient.upsertAsync(aiProperties.getQdrant().getCollectionName(),
-                    toPoints(article, embeddings)).get();
+            UpdateResult result = waitForQdrantOperation(
+                    qdrantClient.upsertAsync(aiProperties.getQdrant().getCollectionName(),
+                            toPoints(article, embeddings)),
+                    "upsert",
+                    article.getDocId());
             if (result.getStatus() != UpdateStatus.Completed) {
-                log.warn("文章[{}]分块向量写入Qdrant未完成，状态为[{}]。", article.getDocId(), result.getStatus());
+                String detail = String.format("文章[%s]分块向量写入Qdrant未完成，状态为[%s]，保留词法路径。",
+                        article.getDocId(), result.getStatus());
+                log.warn(detail);
+                return SyncResult.failed(detail);
             }
+            return SyncResult.succeeded();
         }
         catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log.warn("文章[{}]分块向量写入Qdrant被中断，保留词法路径。", article.getDocId());
+            String detail = String.format("文章[%s]分块向量写入Qdrant被中断，保留词法路径。", article.getDocId());
+            log.warn(detail);
+            return SyncResult.failed(detail);
+        }
+        catch (QdrantOperationTimeoutException e) {
+            log.warn(e.getMessage(), e);
+            return SyncResult.failed(e.getMessage());
         }
         catch (ExecutionException | RuntimeException e) {
-            log.warn("文章[{}]分块向量写入Qdrant失败，保留词法路径: {}", article.getDocId(), e.getMessage());
+            String detail = String.format("文章[%s]分块向量写入Qdrant失败，保留词法路径: %s",
+                    article.getDocId(), e.getMessage());
+            log.warn(detail);
+            return SyncResult.failed(detail);
+        }
+    }
+
+    public record SyncResult(boolean success, String detail) {
+
+        public static SyncResult succeeded() {
+            return new SyncResult(true, null);
+        }
+
+        public static SyncResult failed(String detail) {
+            return new SyncResult(false, detail);
         }
     }
 
@@ -116,7 +162,7 @@ public class ArticleChunkVectorSyncService {
     private void ensureCollectionExistsForRewrite(QdrantClient qdrantClient, List<ArticleChunkEmbedding> embeddings)
             throws ExecutionException, InterruptedException {
         String collectionName = aiProperties.getQdrant().getCollectionName();
-        if (qdrantClient.collectionExistsAsync(collectionName).get()) {
+        if (waitForQdrantOperation(qdrantClient.collectionExistsAsync(collectionName), "collection_exists", null)) {
             return;
         }
         if (embeddings.isEmpty()) {
@@ -131,15 +177,49 @@ public class ArticleChunkVectorSyncService {
                 .orElseThrow(() -> new IllegalArgumentException("向量维度不可以为空"));
 
         synchronized (collectionCreationMonitor) {
-            if (qdrantClient.collectionExistsAsync(collectionName).get()) {
+            if (waitForQdrantOperation(qdrantClient.collectionExistsAsync(collectionName),
+                    "collection_exists",
+                    null)) {
                 return;
             }
-            qdrantClient.createCollectionAsync(collectionName,
-                    VectorParams.newBuilder()
-                            .setDistance(Distance.Cosine)
-                            .setSize(dimensions)
-                            .build())
-                    .get();
+            waitForQdrantOperation(qdrantClient.createCollectionAsync(collectionName,
+                            VectorParams.newBuilder()
+                                    .setDistance(Distance.Cosine)
+                                    .setSize(dimensions)
+                                    .build()),
+                    "collection_create",
+                    null);
+        }
+    }
+
+    long vectorSyncTimeoutMillis() {
+        return VECTOR_SYNC_TIMEOUT_MILLIS;
+    }
+
+    private <T> T waitForQdrantOperation(ListenableFuture<T> future, String operation, String docId)
+            throws ExecutionException, InterruptedException {
+        try {
+            return future.get(vectorSyncTimeoutMillis(), TimeUnit.MILLISECONDS);
+        }
+        catch (TimeoutException e) {
+            future.cancel(true);
+            throw new QdrantOperationTimeoutException(timeoutDetail(operation, docId), e);
+        }
+    }
+
+    private String timeoutDetail(String operation, String docId) {
+        String normalizedDocId = StringUtil.isEmpty(docId) ? "n/a" : docId;
+        return String.format("[%s] operation=%s timeoutMs=%d docId=%s，向量同步等待Qdrant超时，保留词法路径。",
+                QDRANT_TIMEOUT_CODE,
+                operation,
+                vectorSyncTimeoutMillis(),
+                normalizedDocId);
+    }
+
+    private static final class QdrantOperationTimeoutException extends RuntimeException {
+
+        private QdrantOperationTimeoutException(String message, TimeoutException cause) {
+            super(message, cause);
         }
     }
 

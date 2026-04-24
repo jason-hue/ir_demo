@@ -6,10 +6,12 @@ import cn.edu.bistu.cs.ir.config.AppRuntimeProperties;
 import cn.edu.bistu.cs.ir.index.IdxService;
 import cn.edu.bistu.cs.ir.index.LucenePipeline;
 import cn.edu.bistu.cs.ir.utils.StringUtil;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import us.codecraft.webmagic.Page;
 import us.codecraft.webmagic.Request;
@@ -24,6 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static us.codecraft.webmagic.Spider.Status.Stopped;
@@ -64,6 +67,10 @@ public class CrawlerService{
     private String cnBlogRunId;
 
     private final Map<String, TencentSpiderRun> tencentSpiders = new ConcurrentHashMap<>();
+
+    private final AtomicBoolean tencentStartupInProgress = new AtomicBoolean(false);
+
+    private final Object tencentStartupGuard = new Object();
 
 
     /**
@@ -159,16 +166,15 @@ public class CrawlerService{
         tencentSpider.addPipeline(new JsonFilePipeline(config.getCrawler()));
         tencentSpider.thread(1);
         tencentSpider.addUrl(seedUrls.toArray(new String[0]));
-        synchronized (tencentSpiders) {
-            tencentSpiders.put(runId, new TencentSpiderRun(tencentSpider));
-        }
-        tencentSpider.runAsync();
+        trackTencentSpiderRun(runId, tencentSpider);
+        startTencentSpiderRun(runId, tencentSpider);
         log.info("启动面向腾讯新闻分类[{}]的爬虫，种子地址数量为[{}]，最大抓取文章数为[{}]", categoryName, seedUrls.size(), maxArticles);
         return true;
     }
 
-    @PostConstruct
-    public void init(){
+    @Async
+    @EventListener(ApplicationReadyEvent.class)
+    public void startTencentCrawlerAfterApplicationReady() {
         if(!config.isStartCrawler()){
             return;
         }
@@ -182,9 +188,31 @@ public class CrawlerService{
             log.warn("系统配置信息中[startCrawler]配置项为true，但未配置启用的腾讯新闻分类，跳过启动抓取");
             return;
         }
+        synchronized (tencentStartupGuard) {
+            boolean hasActiveStartupBootstrap = hasActiveTencentStartupBootstrap();
+            if (tencentStartupInProgress.get() && !hasActiveStartupBootstrap) {
+                tencentStartupInProgress.set(false);
+            }
+            if (tencentStartupInProgress.get() || hasActiveStartupBootstrap) {
+                log.info("腾讯新闻启动抓取已在进行中，忽略本次重复触发；并发重入不允许，但后续应用重启后的重新启动仍然允许");
+                return;
+            }
 
-        log.info("系统配置信息中[startCrawler]配置项为true，按腾讯新闻配置启动爬虫");
-        startTencentNewsCrawler();
+            tencentStartupInProgress.set(true);
+            try {
+                log.info("系统配置信息中[startCrawler]配置项为true，应用已就绪，异步按腾讯新闻配置启动爬虫");
+                startTencentNewsCrawler();
+            }
+            finally {
+                if (!hasActiveTencentStartupBootstrap()) {
+                    tencentStartupInProgress.set(false);
+                }
+            }
+        }
+    }
+
+    protected boolean hasActiveTencentStartupBootstrap() {
+        return hasRunningTencentCrawler();
     }
 
     private boolean hasAnyRunningCrawler() {
@@ -226,11 +254,34 @@ public class CrawlerService{
         return "tencent-news";
     }
 
-    private String startRunObservation(String categoryName, String source, int seedUrlCount, int maxArticles) {
+    protected String startRunObservation(String categoryName, String source, int seedUrlCount, int maxArticles) {
         if (ingestionObservabilityService != null) {
             return ingestionObservabilityService.startRun(categoryName, source, seedUrlCount, maxArticles);
         }
         return UUID.randomUUID().toString();
+    }
+
+    protected void trackTencentSpiderRun(String runId, Spider tencentSpider) {
+        synchronized (tencentSpiders) {
+            tencentSpiders.put(runId, new TencentSpiderRun(tencentSpider));
+        }
+    }
+
+    protected void startTencentSpiderRun(String runId, Spider tencentSpider) {
+        Thread.ofVirtual()
+                .name("tencent-crawler-" + runId)
+                .start(() -> {
+                    try {
+                        tencentSpider.run();
+                    }
+                    finally {
+                        onTencentSpiderCompleted(runId);
+                    }
+                });
+    }
+
+    protected void onTencentSpiderCompleted(String runId) {
+        retireTencentSpiderRun(runId);
     }
 
     private void refreshCnBlogCrawlerStatus() {
@@ -255,10 +306,18 @@ public class CrawlerService{
                 tencentSpiders.remove(stoppedRunId);
             }
         }
-        if (ingestionObservabilityService != null) {
-            for (String stoppedRunId : stoppedRunIds) {
-                ingestionObservabilityService.markStopped(stoppedRunId);
-            }
+        for (String stoppedRunId : stoppedRunIds) {
+            retireTencentSpiderRun(stoppedRunId);
+        }
+    }
+
+    private void retireTencentSpiderRun(String runId) {
+        boolean removed;
+        synchronized (tencentSpiders) {
+            removed = tencentSpiders.remove(runId) != null;
+        }
+        if (removed && ingestionObservabilityService != null) {
+            ingestionObservabilityService.markStopped(runId);
         }
     }
 

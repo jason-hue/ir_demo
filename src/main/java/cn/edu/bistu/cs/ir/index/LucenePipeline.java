@@ -64,7 +64,10 @@ public class LucenePipeline implements Pipeline {
             return;
         }
         recordIndexSuccess(blog);
-        articleChunkVectorSyncService.syncArticle(blog);
+        ArticleChunkVectorSyncService.SyncResult syncResult = articleChunkVectorSyncService.syncArticle(blog);
+        if (!syncResult.success()) {
+            recordVectorFailure(syncResult.detail(), blog);
+        }
     }
 
     private void recordIndexSuccess(Blog blog) {
@@ -76,6 +79,12 @@ public class LucenePipeline implements Pipeline {
     private void recordIndexFailure(String detail, Blog blog) {
         if (ingestionObservabilityService != null && runId != null) {
             ingestionObservabilityService.recordIndexFailure(runId, detail, blog);
+        }
+    }
+
+    private void recordVectorFailure(String detail, Blog blog) {
+        if (ingestionObservabilityService != null && runId != null) {
+            ingestionObservabilityService.recordVectorFailure(runId, detail, blog);
         }
     }
 

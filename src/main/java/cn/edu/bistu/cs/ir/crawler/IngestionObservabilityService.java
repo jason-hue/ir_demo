@@ -108,6 +108,16 @@ public class IngestionObservabilityService {
         }
     }
 
+    public synchronized void recordVectorFailure(String runIdOrCategory, String detail, Article article) {
+        MutableRunStatus run = resolveActiveRun(runIdOrCategory);
+        if (run != null) {
+            run.vectorFailureCount++;
+            run.lastError = trim(detail);
+            run.lastIndexedDocId = article == null ? run.lastIndexedDocId : articleValue(article, "docId");
+            run.lastIndexedSourceUrl = article == null ? run.lastIndexedSourceUrl : articleValue(article, "sourceUrl");
+        }
+    }
+
     public synchronized void markStopped(String runIdOrCategory) {
         String runId = resolveActiveRunId(runIdOrCategory);
         if (runId == null) {
@@ -149,10 +159,18 @@ public class IngestionObservabilityService {
     static IngestionStatusSnapshot.RunOutcome deriveOutcomeForTest(int indexedDocumentCount,
                                                                    int requestFailureCount,
                                                                    int indexFailureCount) {
+        return deriveOutcomeForTest(indexedDocumentCount, requestFailureCount, indexFailureCount, 0);
+    }
+
+    static IngestionStatusSnapshot.RunOutcome deriveOutcomeForTest(int indexedDocumentCount,
+                                                                   int requestFailureCount,
+                                                                   int indexFailureCount,
+                                                                   int vectorFailureCount) {
         MutableRunStatus run = new MutableRunStatus("test-run-id", "test", "test", 0, 0, Instant.now());
         run.indexedDocumentCount = indexedDocumentCount;
         run.requestFailureCount = requestFailureCount;
         run.indexFailureCount = indexFailureCount;
+        run.vectorFailureCount = vectorFailureCount;
         return deriveOutcome(run);
     }
 
@@ -225,7 +243,7 @@ public class IngestionObservabilityService {
 
     private static IngestionStatusSnapshot.RunOutcome deriveOutcome(MutableRunStatus run) {
         boolean hasIndexedDocuments = run.indexedDocumentCount > 0;
-        boolean hasFailures = run.requestFailureCount > 0 || run.indexFailureCount > 0;
+        boolean hasFailures = run.requestFailureCount > 0 || run.indexFailureCount > 0 || run.vectorFailureCount > 0;
         if (hasIndexedDocuments && hasFailures) {
             return IngestionStatusSnapshot.RunOutcome.PARTIAL_SUCCESS;
         }
@@ -291,6 +309,8 @@ public class IngestionObservabilityService {
         private int indexedDocumentCount;
 
         private int indexFailureCount;
+
+        private int vectorFailureCount;
 
         private String lastError;
 

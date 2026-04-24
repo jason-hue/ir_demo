@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -91,12 +92,12 @@ public class OllamaWarmupService {
 
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                return markFailure("聊天模型预热失败，HTTP " + response.statusCode() + " (" + reason + ")");
+                return markFailure("聊天模型预热失败，HTTP " + response.statusCode() + " (" + reason + ")", reason);
             }
 
             JsonNode root = objectMapper.readTree(response.body());
             if (root.path("response").asText().isBlank() && !root.path("done").asBoolean(false)) {
-                return markFailure("聊天模型预热未返回有效内容 (" + reason + ")");
+                return markFailure("聊天模型预热未返回有效内容 (" + reason + ")", reason);
             }
 
             chatReady.set(true);
@@ -105,11 +106,15 @@ public class OllamaWarmupService {
             return true;
         }
         catch (Exception e) {
-            return markFailure("聊天模型预热失败: " + e.getMessage() + " (" + reason + ")");
+            return markFailure("聊天模型预热失败: " + e.getMessage() + " (" + reason + ")", reason);
         }
     }
 
-    private boolean markFailure(String detail) {
+    private boolean markFailure(String detail, String reason) {
+        if (chatReady.get() && !Objects.equals("startup", reason)) {
+            log.warn("{}，保留最近成功预热状态", detail);
+            return false;
+        }
         chatReady.set(false);
         readinessDetail.set(detail);
         log.warn(detail);
