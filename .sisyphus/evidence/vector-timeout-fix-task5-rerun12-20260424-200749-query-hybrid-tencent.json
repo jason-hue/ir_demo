@@ -1,0 +1,109 @@
+{
+  "success": true,
+  "msg": "向量路径不可用，已退化为词法检索",
+  "data": {
+    "question": "腾讯新闻",
+    "mode": "lexical_only",
+    "pageNo": 1,
+    "pageSize": 5,
+    "totalResults": 20,
+    "degradedReason": "向量检索执行超时，已在120秒后退化为词法检索",
+    "results": [
+      {
+        "docId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a",
+        "chunkId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a#6",
+        "title": "羊毛少了，信用卡凉了？",
+        "source": "tencent-news-finance",
+        "sourceUrl": "https://news.qq.com/rain/a/20260422A0888N00",
+        "publishTime": "2026-04-22T23:00:01Z",
+        "section": "finance",
+        "author": "腾讯财经",
+        "byline": "腾讯财经",
+        "chunkIndex": 6,
+        "charCount": 173,
+        "chunkText": "向存量经营转型；而城商行、农商行则多数选择战略性收缩，信用卡业务逐渐边缘化。在信用卡存量创下近7年新低的同时，各行信用卡业绩中的多项重要指标（如交易金额、业务收入、贷款余额等）也整体呈现出下降的趋势。数据来源：各银行2025年财报，腾讯财经整理\n注：各行披露口径略有差异（信用卡透支/信用卡贷款/信用卡应收账款），本文按各行年报原始披露口径引用；",
+        "lexicalRank": 1,
+        "vectorRank": null,
+        "fusedScore": 0.01639344262295082
+      },
+      {
+        "docId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a",
+        "chunkId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a#7",
+        "title": "羊毛少了，信用卡凉了？",
+        "source": "tencent-news-finance",
+        "sourceUrl": "https://news.qq.com/rain/a/20260422A0888N00",
+        "publishTime": "2026-04-22T23:00:01Z",
+        "section": "finance",
+        "author": "腾讯财经",
+        "byline": "腾讯财经",
+        "chunkIndex": 7,
+        "charCount": 128,
+        "chunkText": "易金额、业务收入、贷款余额等）也整体呈现出下降的趋势。数据来源：各银行2025年财报，腾讯财经整理\n注：各行披露口径略有差异（信用卡透支/信用卡贷款/信用卡应收账款），本文按各行年报原始披露口径引用；平安银行的“累计发卡量”统计口径改为“信用卡流通户数”。",
+        "lexicalRank": 2,
+        "vectorRank": null,
+        "fusedScore": 0.016129032258064516
+      },
+      {
+        "docId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a",
+        "chunkId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a#8",
+        "title": "羊毛少了，信用卡凉了？",
+        "source": "tencent-news-finance",
+        "sourceUrl": "https://news.qq.com/rain/a/20260422A0888N00",
+        "publishTime": "2026-04-22T23:00:01Z",
+        "section": "finance",
+        "author": "腾讯财经",
+        "byline": "腾讯财经",
+        "chunkIndex": 8,
+        "charCount": 130,
+        "chunkText": "据来源：各银行2025年财报，腾讯财经整理\n注：各行披露口径略有差异（信用卡透支/信用卡贷款/信用卡应收账款），本文按各行年报原始披露口径引用；平安银行的“累计发卡量”统计口径改为“信用卡流通户数”。信用卡贷款余额是衡量信用卡业务规模体量和盈利基础的核心指标。",
+        "lexicalRank": 3,
+        "vectorRank": null,
+        "fusedScore": 0.015873015873015872
+      },
+      {
+        "docId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a",
+        "chunkId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a#22",
+        "title": "羊毛少了，信用卡凉了？",
+        "source": "tencent-news-finance",
+        "sourceUrl": "https://news.qq.com/rain/a/20260422A0888N00",
+        "publishTime": "2026-04-22T23:00:01Z",
+        "section": "finance",
+        "author": "腾讯财经",
+        "byline": "腾讯财经",
+        "chunkIndex": 22,
+        "charCount": 183,
+        "chunkText": "位列第四。此外值得关注的是，2025年各行信用卡交易金额与2024年相比全线下降。国家统计局数据显示，2025年社会消费品零售总额同比增速有所放缓。作为消费主要支付工具之一的信用卡交易规模也同步承压。图片来源：国家统计局官网\n对此，信用卡专家董峥向腾讯财经表示，信用卡消费对宏观消费环境的敏感性更高，当年轻人消费转向“理性减负”，信用卡高频、小额的交易场景首当其冲。",
+        "lexicalRank": 4,
+        "vectorRank": null,
+        "fusedScore": 0.015625
+      },
+      {
+        "docId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a",
+        "chunkId": "de1fc042d51bbeff358dd4907447ae01899b2f6c422b7469c754e728930a667a#23",
+        "title": "羊毛少了，信用卡凉了？",
+        "source": "tencent-news-finance",
+        "sourceUrl": "https://news.qq.com/rain/a/20260422A0888N00",
+        "publishTime": "2026-04-22T23:00:01Z",
+        "section": "finance",
+        "author": "腾讯财经",
+        "byline": "腾讯财经",
+        "chunkIndex": 23,
+        "charCount": 168,
+        "chunkText": "具之一的信用卡交易规模也同步承压。图片来源：国家统计局官网\n对此，信用卡专家董峥向腾讯财经表示，信用卡消费对宏观消费环境的敏感性更高，当年轻人消费转向“理性减负”，信用卡高频、小额的交易场景首当其冲。不过他也指出，“年轻用户在抛弃信用卡”的说法较为片面，事实上，年轻一代对消费信贷的需求仍然存在，只是从信用卡转向了其他线上支付信贷产品。",
+        "lexicalRank": 5,
+        "vectorRank": null,
+        "fusedScore": 0.015384615384615385
+      }
+    ]
+  },
+  "_meta": {
+    "requestedAt": "2026-04-24T20:10:29.937113+08:00",
+    "status": 200,
+    "elapsedSeconds": 119.183,
+    "payload": {
+      "question": "腾讯新闻",
+      "pageNo": 1,
+      "pageSize": 5
+    }
+  }
+}

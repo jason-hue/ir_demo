@@ -1,0 +1,14 @@
+[2026-04-22 01:03:35 +08:00] F2 code quality review
+
+Reviewer: unspecified-high with code-review-helper + regression-risk-assessor
+Scope:
+- src/main/java/cn/edu/bistu/cs/ir/ai/ChatAnswerService.java
+- src/test/java/cn/edu/bistu/cs/ir/ai/ChatAnswerServiceTest.java
+
+Result:
+- VERDICT: APPROVE
+
+Top reasons:
+- prompt wording, citation filtering, exact `证据不足` fallback, and exact `【非向量证据回答】` prefix logic all align with the plan’s fixed semantics
+- no concrete correctness or maintainability blocker remained once the review was aligned to the plan’s explicit rules
+- focused test validation remained green

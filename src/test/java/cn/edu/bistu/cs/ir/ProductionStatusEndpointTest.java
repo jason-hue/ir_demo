@@ -8,6 +8,7 @@ import cn.edu.bistu.cs.ir.utils.QueryResponse;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -16,12 +17,16 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -32,14 +37,15 @@ import java.util.Map;
         "irdemo.ai.qdrant.http-port=1",
         "irdemo.ai.qdrant.grpc-port=1",
         "irdemo.ai.provider-status.connect-timeout=100ms",
-        "irdemo.ai.provider-status.read-timeout=100ms",
-        "irdemo.dir.home=workspace/test-production-status",
-        "irdemo.dir.idx=${irdemo.dir.home}/idx",
-        "irdemo.dir.crawler=${irdemo.dir.home}/crawler"
+        "irdemo.ai.provider-status.read-timeout=100ms"
 })
 class ProductionStatusEndpointTest {
 
+    private static final String ARTICLE_FIXTURE = "fixtures/tencent/news/article-page.html";
+
     private static final String MALFORMED_FIXTURE = "fixtures/tencent/news/malformed-article-page.html";
+
+    private static final Path TEST_HOME = createTestHome();
 
     @Autowired
     private CrawlerService crawlerService;
@@ -49,6 +55,13 @@ class ProductionStatusEndpointTest {
 
     @Autowired
     private TestRestTemplate restTemplate;
+
+    @DynamicPropertySource
+    static void registerWorkDirs(DynamicPropertyRegistry registry) {
+        registry.add("irdemo.dir.home", () -> TEST_HOME.toString());
+        registry.add("irdemo.dir.idx", () -> TEST_HOME.resolve("idx").toString());
+        registry.add("irdemo.dir.crawler", () -> TEST_HOME.resolve("crawler").toString());
+    }
 
     @Test
     void productionStatusExposesLuceneProviderAndIngestSnapshots() {
@@ -142,6 +155,55 @@ class ProductionStatusEndpointTest {
             Assertions.assertTrue(brokenStatus.requestFailureCount() > 0);
             Assertions.assertEquals(0, brokenStatus.indexedDocumentCount());
             Assertions.assertTrue(brokenStatus.lastError().contains("yielded no article URLs"));
+        }
+    }
+
+    @Test
+    void productionStatusMarksLuceneSuccessPlusVectorFailureAsPartialSuccess() throws Exception {
+        String articleHtml = readFixture(ARTICLE_FIXTURE);
+        try (HttpServerHandle server = startServer(Map.of("/rain/a/20240318A01AB000", articleHtml))) {
+            crawlerService.startTencentNewsCrawler(
+                    java.util.List.of(server.url("/rain/a/20240318A01AB000")),
+                    "vector-sync-outage",
+                    1);
+
+            IngestionStatusSnapshot.CategoryRunStatus status = awaitCategoryStatus("adhoc", "vector-sync-outage");
+
+            Assertions.assertNotNull(status);
+            Assertions.assertAll(
+                    () -> Assertions.assertEquals(IngestionStatusSnapshot.RunOutcome.PARTIAL_SUCCESS, status.outcome()),
+                    () -> Assertions.assertTrue(status.requestSuccessCount() > 0),
+                    () -> Assertions.assertEquals(1, status.indexedDocumentCount()),
+                    () -> Assertions.assertEquals(0, status.indexFailureCount()),
+                    () -> Assertions.assertNotNull(status.lastIndexedDocId()),
+                    () -> Assertions.assertTrue(status.lastIndexedSourceUrl().contains("20240318A01AB000")),
+                    () -> Assertions.assertTrue(status.lastError().contains("分块向量"))
+            );
+        }
+    }
+
+    @AfterAll
+    static void cleanWorkspace() throws IOException {
+        if (!Files.exists(TEST_HOME)) {
+            return;
+        }
+        try (var paths = Files.walk(TEST_HOME)) {
+            paths.sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.deleteIfExists(path);
+                        } catch (IOException e) {
+                            throw new UncheckedIOException(e);
+                        }
+                    });
+        }
+    }
+
+    private static Path createTestHome() {
+        try {
+            return Files.createTempDirectory("ir-demo-production-status-");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 

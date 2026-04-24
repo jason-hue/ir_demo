@@ -179,6 +179,13 @@ class IngestionObservabilityServiceTest {
                 IngestionObservabilityService.deriveOutcomeForTest(2, 0, 1));
     }
 
+    @Test
+    void deriveOutcomeMarksPartialSuccessWhenVectorSyncFailsAfterLuceneSuccess() {
+        Assertions.assertEquals(
+                IngestionStatusSnapshot.RunOutcome.PARTIAL_SUCCESS,
+                IngestionObservabilityService.deriveOutcomeForTest(1, 0, 0, 1));
+    }
+
     private static Article article(String docId, String sourceUrl) {
         Article article = new Article();
         setArticleField(article, "docId", docId);
