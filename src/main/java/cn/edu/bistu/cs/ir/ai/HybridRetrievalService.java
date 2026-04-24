@@ -91,8 +91,6 @@ public class HybridRetrievalService {
         String mode = MODE_LEXICAL_ONLY;
         String degradedReason = null;
         VectorRetrievalAvailability vectorAvailability = vectorRetrievalAvailability();
-        long retrievalDeadlineNanos = System.nanoTime() + vectorRetrievalTimeout.toNanos();
-
         if (vectorAvailability.available()) {
             CompletableFuture<List<HybridChunkResult>> lexicalFuture = CompletableFuture.supplyAsync(
                     () -> lexicalRetrieve(normalizedQuestion));
@@ -100,16 +98,12 @@ public class HybridRetrievalService {
                     () -> vectorRetrieve(normalizedQuestion));
 
             try {
-                long remainingBudgetNanos = retrievalDeadlineNanos - System.nanoTime();
-                if (remainingBudgetNanos <= 0L) {
+                lexicalResults = lexicalFuture.get();
+                long vectorWaitBudgetNanos = vectorRetrievalTimeout.toNanos() - vectorTimeoutGuardBandNanos();
+                if (vectorWaitBudgetNanos <= 0L) {
                     throw new TimeoutException("vector retrieval deadline exhausted");
                 }
-                lexicalResults = lexicalFuture.get(remainingBudgetNanos, TimeUnit.NANOSECONDS);
-                long remainingAfterLexical = retrievalDeadlineNanos - System.nanoTime() - vectorTimeoutGuardBandNanos();
-                if (remainingAfterLexical <= 0L) {
-                    throw new TimeoutException("vector retrieval deadline exhausted");
-                }
-                vectorResults = vectorFuture.get(remainingAfterLexical, TimeUnit.NANOSECONDS);
+                vectorResults = vectorFuture.get(vectorWaitBudgetNanos, TimeUnit.NANOSECONDS);
                 if (!vectorResults.isEmpty()) {
                     mode = MODE_HYBRID;
                 }

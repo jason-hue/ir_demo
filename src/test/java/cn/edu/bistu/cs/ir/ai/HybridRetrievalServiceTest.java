@@ -167,11 +167,11 @@ class HybridRetrievalServiceTest {
     }
 
     @Test
-    void retrieveUsesOneEndToEndBudgetInsteadOfAddingFreshVectorTimeoutAfterSlowLexical() throws Exception {
+    void retrieveAppliesFreshVectorTimeoutAfterSlowLexicalCompletes() throws Exception {
         HybridRetrievalService service = new BlockingVectorHybridRetrievalService(Duration.ofMillis(150), Duration.ofMillis(200));
 
         Instant started = Instant.now();
-        HybridRetrievalResult result = retrieveWithinBudget(service, "新闻检索助手", Duration.ofMillis(320));
+        HybridRetrievalResult result = retrieveWithinBudget(service, "新闻检索助手", Duration.ofMillis(380));
         long elapsedMillis = Duration.between(started, Instant.now()).toMillis();
 
         Assertions.assertAll(
@@ -180,8 +180,10 @@ class HybridRetrievalServiceTest {
                 () -> Assertions.assertEquals("chunk-lexical", result.getResults().getFirst().getChunkId()),
                 () -> Assertions.assertTrue(result.getDegradedReason().contains("超时")),
                 () -> Assertions.assertTrue(result.getDegradedReason().contains("200毫秒")),
-                () -> Assertions.assertTrue(elapsedMillis < 320,
-                        "retrieve should honor one end-to-end vector budget instead of lexical latency plus a fresh timeout")
+                () -> Assertions.assertTrue(elapsedMillis >= 290,
+                        "slow lexical work should no longer consume the vector timeout budget"),
+                () -> Assertions.assertTrue(elapsedMillis < 380,
+                        "retrieve should still degrade promptly after lexical work plus the vector wait budget")
         );
     }
 
