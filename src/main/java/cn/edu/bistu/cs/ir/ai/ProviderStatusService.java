@@ -49,7 +49,7 @@ public class ProviderStatusService {
     public ProviderStatusSnapshot snapshot() {
         ProviderStatus ollamaChat = ollamaModelStatus("ollama-chat", aiProperties.getOllama().getChatModel());
         ollamaChat = applyWarmupReadiness(ollamaChat);
-        ProviderStatus ollamaEmbedding = ollamaModelStatus("ollama-embedding", aiProperties.getOllama().getEmbeddingModel());
+        ProviderStatus ollamaEmbedding = ollamaEmbeddingStatus(aiProperties.getOllama().getEmbeddingModel());
         ProviderStatus qdrant = qdrantStatus();
         AiFallbackMode fallbackMode = isAiReady(ollamaChat, ollamaEmbedding, qdrant)
                 ? AiFallbackMode.AI_READY
@@ -98,6 +98,35 @@ public class ProviderStatusService {
         }
     }
 
+    public ProviderStatus ollamaEmbeddingStatus(String configuredModel) {
+        ProviderStatus modelStatus = ollamaModelStatus("ollama-embedding", configuredModel);
+        if (modelStatus.state() != ProviderAvailabilityState.AVAILABLE) {
+            return modelStatus;
+        }
+
+        ProbeResult probe = httpPost(normalizeBaseUrl(aiProperties.getOllama().getBaseUrl()) + "/api/embed",
+                embeddingProbePayload(configuredModel));
+        if (probe.timedOut()) {
+            return new ProviderStatus("ollama-embedding", ProviderAvailabilityState.DEGRADED, true,
+                    "Ollama embedding probe timed out after "
+                            + formatTimeout(aiProperties.getProviderStatus().getReadTimeout())
+                            + " for model '" + configuredModel + "'.");
+        }
+
+        HttpResponse<String> response = probe.response();
+        if (response == null) {
+            return new ProviderStatus("ollama-embedding", ProviderAvailabilityState.DEGRADED, true,
+                    "Ollama embedding probe did not complete for model '" + configuredModel + "'.");
+        }
+
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            return new ProviderStatus("ollama-embedding", ProviderAvailabilityState.DEGRADED, true,
+                    "Ollama embedding probe returned HTTP " + response.statusCode()
+                            + " for model '" + configuredModel + "'.");
+        }
+        return modelStatus;
+    }
+
     public ProviderStatus qdrantStatus() {
         if (!aiProperties.getQdrant().isEnabled()) {
             return new ProviderStatus("qdrant", ProviderAvailabilityState.DISABLED, false,
@@ -142,15 +171,25 @@ public class ProviderStatusService {
     }
 
     private ProbeResult httpGet(String url) {
+        return httpRequest(HttpRequest.newBuilder(URI.create(url))
+                .GET()
+                .timeout(aiProperties.getProviderStatus().getReadTimeout())
+                .build(), url);
+    }
+
+    private ProbeResult httpPost(String url, String payload) {
+        return httpRequest(HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .timeout(aiProperties.getProviderStatus().getReadTimeout())
+                .build(), url);
+    }
+
+    private ProbeResult httpRequest(HttpRequest request, String url) {
         try {
             Duration connectTimeout = aiProperties.getProviderStatus().getConnectTimeout();
-            Duration readTimeout = aiProperties.getProviderStatus().getReadTimeout();
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(connectTimeout)
-                    .build();
-            HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                    .GET()
-                    .timeout(readTimeout)
                     .build();
             return ProbeResult.fromResponse(client.send(request, HttpResponse.BodyHandlers.ofString()));
         }
@@ -166,6 +205,13 @@ public class ProviderStatusService {
             log.debug("Provider probe failed for {}", url, e);
             return ProbeResult.unavailableProbe();
         }
+    }
+
+    private String embeddingProbePayload(String configuredModel) {
+        return objectMapper.createObjectNode()
+                .put("model", configuredModel)
+                .put("input", "health-check")
+                .toString();
     }
 
     private String formatTimeout(Duration timeout) {

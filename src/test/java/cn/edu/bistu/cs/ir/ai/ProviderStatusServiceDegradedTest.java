@@ -22,6 +22,30 @@ class ProviderStatusServiceDegradedTest {
 
     private volatile String lastRawPath;
 
+    private volatile String lastMethod;
+
+    @Test
+    void ollamaEmbeddingStatusReturnsDegradedWhenEmbedEndpointFailsAfterModelDiscoverySucceeds() throws Exception {
+        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/api/tags", exchange -> writeJsonResponse(exchange,
+                200,
+                "{\"models\":[{\"model\":\"nomic-embed-text\"}]}"));
+        server.createContext("/api/embed", exchange -> writeJsonResponse(exchange,
+                500,
+                "{\"error\":\"embed failed\"}"));
+        server.start();
+
+        ProviderStatus status = ollamaEmbeddingStatusAtPort(server.getAddress().getPort());
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(ProviderAvailabilityState.DEGRADED, status.state()),
+                () -> Assertions.assertTrue(status.enabled()),
+                () -> Assertions.assertTrue(status.detail().contains("embedding probe returned HTTP 500")),
+                () -> Assertions.assertEquals("/api/embed", lastRawPath),
+                () -> Assertions.assertEquals("POST", lastMethod)
+        );
+    }
+
     @Test
     void qdrantStatusReturnsUnavailableWhenCollectionEndpointCannotBeReached() throws Exception {
         ProviderStatus status = probeUnavailable();
@@ -149,12 +173,38 @@ class ProviderStatusServiceDegradedTest {
         return new ProviderStatusService(properties, new ObjectMapper()).qdrantStatus();
     }
 
+    private ProviderStatus ollamaEmbeddingStatusAtPort(int port) {
+        AiProperties properties = new AiProperties();
+        Object ollama = ReflectionTestUtils.getField(properties, "ollama");
+        Object providerStatus = ReflectionTestUtils.getField(properties, "providerStatus");
+        ReflectionTestUtils.setField(ollama, "enabled", true);
+        ReflectionTestUtils.setField(ollama, "baseUrl", "http://127.0.0.1:" + port);
+        ReflectionTestUtils.setField(ollama, "embeddingModel", "nomic-embed-text");
+        ReflectionTestUtils.setField(providerStatus, "connectTimeout", Duration.ofSeconds(2));
+        ReflectionTestUtils.setField(providerStatus, "readTimeout", Duration.ofSeconds(2));
+
+        return new ProviderStatusService(properties, new ObjectMapper())
+                .ollamaEmbeddingStatus(properties.getOllama().getEmbeddingModel());
+    }
+
     private void writeResponse(HttpExchange exchange, int responseStatus) throws IOException {
         lastRawPath = exchange.getRequestURI().getRawPath();
+        lastMethod = exchange.getRequestMethod();
         byte[] payload = new byte[0];
         exchange.sendResponseHeaders(responseStatus, payload.length);
         try (OutputStream outputStream = exchange.getResponseBody()) {
             outputStream.write(payload);
+        }
+    }
+
+    private void writeJsonResponse(HttpExchange exchange, int responseStatus, String payload) throws IOException {
+        lastRawPath = exchange.getRequestURI().getRawPath();
+        lastMethod = exchange.getRequestMethod();
+        byte[] bytes = payload.getBytes();
+        exchange.getResponseHeaders().add("Content-Type", "application/json");
+        exchange.sendResponseHeaders(responseStatus, bytes.length);
+        try (OutputStream outputStream = exchange.getResponseBody()) {
+            outputStream.write(bytes);
         }
     }
 }
