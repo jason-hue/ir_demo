@@ -15,9 +15,18 @@ public class AiProperties {
 
     private Ollama ollama = new Ollama();
 
+    private Retrieval retrieval = new Retrieval();
+
     private Qdrant qdrant = new Qdrant();
 
     private ProviderStatus providerStatus = new ProviderStatus();
+
+    @Getter
+    @Setter
+    public static class Retrieval {
+
+        private Duration vectorTimeout = Duration.ofSeconds(120);
+    }
 
     @Getter
     @Setter

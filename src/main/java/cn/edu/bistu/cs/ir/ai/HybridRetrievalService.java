@@ -1,5 +1,6 @@
 package cn.edu.bistu.cs.ir.ai;
 
+import cn.edu.bistu.cs.ir.config.AiProperties;
 import cn.edu.bistu.cs.ir.index.ArticleIdxFields;
 import cn.edu.bistu.cs.ir.index.IdxService;
 import cn.edu.bistu.cs.ir.model.Article;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -29,6 +31,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Service
 public class HybridRetrievalService {
@@ -43,6 +48,12 @@ public class HybridRetrievalService {
 
     static final int VECTOR_TOP_K = 20;
 
+    static final long REQUEST_TIMEOUT_GUARD_BAND_MILLIS_FLOOR = 50L;
+
+    static final long REQUEST_TIMEOUT_GUARD_BAND_MILLIS_CEILING = 2_000L;
+
+    static final long REQUEST_TIMEOUT_GUARD_BAND_DIVISOR = 60L;
+
     private static final Logger log = LoggerFactory.getLogger(HybridRetrievalService.class);
 
     private final IdxService idxService;
@@ -53,14 +64,18 @@ public class HybridRetrievalService {
 
     private final ObjectProvider<VectorStore> vectorStoreProvider;
 
+    private final Duration vectorRetrievalTimeout;
+
     public HybridRetrievalService(IdxService idxService,
                                   ArticleChunkingService articleChunkingService,
                                   ProviderStatusService providerStatusService,
-                                  ObjectProvider<VectorStore> vectorStoreProvider) {
+                                  ObjectProvider<VectorStore> vectorStoreProvider,
+                                  AiProperties aiProperties) {
         this.idxService = idxService;
         this.articleChunkingService = articleChunkingService;
         this.providerStatusService = providerStatusService;
         this.vectorStoreProvider = vectorStoreProvider;
+        this.vectorRetrievalTimeout = aiProperties.getRetrieval().getVectorTimeout();
     }
 
     public HybridRetrievalResult retrieve(String question, int pageNo, int pageSize) throws Exception {
@@ -71,11 +86,12 @@ public class HybridRetrievalService {
 
         int normalizedPageNo = Math.max(pageNo, 1);
         int normalizedPageSize = Math.max(pageSize, 1);
-        List<HybridChunkResult> lexicalResults;
+        List<HybridChunkResult> lexicalResults = List.of();
         List<HybridChunkResult> vectorResults = List.of();
         String mode = MODE_LEXICAL_ONLY;
         String degradedReason = null;
         VectorRetrievalAvailability vectorAvailability = vectorRetrievalAvailability();
+        long retrievalDeadlineNanos = System.nanoTime() + vectorRetrievalTimeout.toNanos();
 
         if (vectorAvailability.available()) {
             CompletableFuture<List<HybridChunkResult>> lexicalFuture = CompletableFuture.supplyAsync(
@@ -83,10 +99,34 @@ public class HybridRetrievalService {
             CompletableFuture<List<HybridChunkResult>> vectorFuture = CompletableFuture.supplyAsync(
                     () -> vectorRetrieve(normalizedQuestion));
 
-            lexicalResults = lexicalFuture.join();
             try {
-                vectorResults = vectorFuture.join();
-                mode = MODE_HYBRID;
+                long remainingBudgetNanos = retrievalDeadlineNanos - System.nanoTime();
+                if (remainingBudgetNanos <= 0L) {
+                    throw new TimeoutException("vector retrieval deadline exhausted");
+                }
+                lexicalResults = lexicalFuture.get(remainingBudgetNanos, TimeUnit.NANOSECONDS);
+                long remainingAfterLexical = retrievalDeadlineNanos - System.nanoTime() - vectorTimeoutGuardBandNanos();
+                if (remainingAfterLexical <= 0L) {
+                    throw new TimeoutException("vector retrieval deadline exhausted");
+                }
+                vectorResults = vectorFuture.get(remainingAfterLexical, TimeUnit.NANOSECONDS);
+                if (!vectorResults.isEmpty()) {
+                    mode = MODE_HYBRID;
+                }
+            }
+            catch (TimeoutException e) {
+                vectorFuture.cancel(true);
+                degradedReason = "向量检索执行超时，已在" + formatTimeout(vectorRetrievalTimeoutMillis()) + "后退化为词法检索";
+                log.warn(degradedReason, e);
+            }
+            catch (InterruptedException e) {
+                vectorFuture.cancel(true);
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("混合检索等待向量结果时被中断", e);
+            }
+            catch (ExecutionException e) {
+                degradedReason = resolveFailureMessage(e, "向量检索执行失败，已退化为词法检索");
+                log.warn(degradedReason, e);
             }
             catch (CompletionException e) {
                 degradedReason = resolveFailureMessage(e, "向量检索执行失败，已退化为词法检索");
@@ -121,6 +161,21 @@ public class HybridRetrievalService {
 
     protected String vectorUnavailableReason() {
         return vectorRetrievalAvailability().reason();
+    }
+
+    protected long vectorRetrievalTimeoutMillis() {
+        return vectorRetrievalTimeout.toMillis();
+    }
+
+    protected long vectorTimeoutGuardBandNanos() {
+        return requestTimeoutGuardBandNanos(vectorRetrievalTimeout);
+    }
+
+    private long requestTimeoutGuardBandNanos(Duration timeout) {
+        long timeoutMillis = timeout.toMillis();
+        long guardBandMillis = Math.max(REQUEST_TIMEOUT_GUARD_BAND_MILLIS_FLOOR,
+                Math.min(REQUEST_TIMEOUT_GUARD_BAND_MILLIS_CEILING, timeoutMillis / REQUEST_TIMEOUT_GUARD_BAND_DIVISOR));
+        return TimeUnit.MILLISECONDS.toNanos(guardBandMillis);
     }
 
     private VectorRetrievalAvailability vectorRetrievalAvailability() {
@@ -382,6 +437,13 @@ public class HybridRetrievalService {
         int lexicalRank = result.getLexicalRank() == null ? Integer.MAX_VALUE : result.getLexicalRank();
         int vectorRank = result.getVectorRank() == null ? Integer.MAX_VALUE : result.getVectorRank();
         return Math.min(lexicalRank, vectorRank);
+    }
+
+    private String formatTimeout(long timeoutMillis) {
+        if (timeoutMillis % 1000 == 0) {
+            return (timeoutMillis / 1000) + "秒";
+        }
+        return timeoutMillis + "毫秒";
     }
 
     private String resolveFailureMessage(Throwable throwable, String fallback) {
