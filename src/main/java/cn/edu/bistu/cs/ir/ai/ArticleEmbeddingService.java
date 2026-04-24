@@ -15,6 +15,7 @@ import jakarta.annotation.PreDestroy;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,8 +56,19 @@ public class ArticleEmbeddingService {
     }
 
     public List<ArticleChunkEmbedding> generateEmbeddings(Article article) {
+        return generateEmbeddings(article, false);
+    }
+
+    public List<ArticleChunkEmbedding> generateEmbeddingsForBackfill(Article article) {
+        return generateEmbeddings(article, true);
+    }
+
+    private List<ArticleChunkEmbedding> generateEmbeddings(Article article, boolean ignoreLexicalOnlyMode) {
         List<ArticleChunkMetadata> chunks = articleChunkingService.chunk(article);
-        if (chunks.isEmpty() || aiFallbackService.isLexicalOnlyMode()) {
+        if (chunks.isEmpty()) {
+            return List.of();
+        }
+        if (!ignoreLexicalOnlyMode && aiFallbackService.isLexicalOnlyMode()) {
             return List.of();
         }
 
@@ -66,22 +78,7 @@ public class ArticleEmbeddingService {
         }
 
         try {
-            EmbeddingResponse response = embedForResponseWithTimeout(article, embeddingModel,
-                    chunks.stream().map(ArticleChunkMetadata::getChunkText).toList());
-            List<Embedding> results = response.getResults();
-            if (results.size() != chunks.size()) {
-                log.warn("文章[{}]分块向量数量[{}]与分块数量[{}]不一致，跳过向量结果。",
-                        article.getDocId(), results.size(), chunks.size());
-                return List.of();
-            }
-
-            String embeddingModelName = resolveEmbeddingModelName(response);
-            List<ArticleChunkEmbedding> embeddings = new ArrayList<>(chunks.size());
-            for (int i = 0; i < chunks.size(); i++) {
-                ArticleChunkMetadata metadata = copyMetadata(chunks.get(i), embeddingModelName);
-                embeddings.add(new ArticleChunkEmbedding(metadata, results.get(i).getOutput()));
-            }
-            return List.copyOf(embeddings);
+            return embedChunksSequentially(article, embeddingModel, chunks);
         }
         catch (EmbeddingGenerationTimeoutException e) {
             throw e;
@@ -99,6 +96,38 @@ public class ArticleEmbeddingService {
 
     long embeddingTimeoutMillis() {
         return EMBEDDING_TIMEOUT_MILLIS;
+    }
+
+    private List<ArticleChunkEmbedding> embedChunksSequentially(Article article,
+                                                                EmbeddingModel embeddingModel,
+                                                                List<ArticleChunkMetadata> chunks) {
+        List<ArticleChunkEmbedding> embeddings = new ArrayList<>(chunks.size());
+        String embeddingModelName = null;
+        for (ArticleChunkMetadata chunk : chunks) {
+            EmbeddingResponse response = embedForResponseWithTimeout(article, embeddingModel, List.of(chunk.getChunkText()));
+            List<Embedding> results = response.getResults();
+            if (results.size() != 1) {
+                log.warn("文章[{}]分块向量数量[{}]与单次分块请求数量[1]不一致，跳过向量结果。",
+                        article.getDocId(), results.size());
+                return List.of();
+            }
+
+            if (embeddingModelName == null) {
+                embeddingModelName = resolveEmbeddingModelName(response);
+            }
+            else {
+                String batchModelName = resolveEmbeddingModelName(response);
+                if (!Objects.equals(embeddingModelName, batchModelName)) {
+                    log.warn("文章[{}]分块向量模型名称前后不一致[{} -> {}]，跳过向量结果。",
+                            article.getDocId(), embeddingModelName, batchModelName);
+                    return List.of();
+                }
+            }
+
+            ArticleChunkMetadata metadata = copyMetadata(chunk, embeddingModelName);
+            embeddings.add(new ArticleChunkEmbedding(metadata, results.getFirst().getOutput()));
+        }
+        return List.copyOf(embeddings);
     }
 
     private EmbeddingResponse embedForResponseWithTimeout(Article article,

@@ -4,6 +4,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import cn.edu.bistu.cs.ir.config.AiProperties;
 import cn.edu.bistu.cs.ir.model.Article;
 import cn.edu.bistu.cs.ir.model.ArticleChunkMetadata;
+import cn.edu.bistu.cs.ir.model.ArticleIds;
 import cn.edu.bistu.cs.ir.utils.StringUtil;
 import io.qdrant.client.PointIdFactory;
 import io.qdrant.client.QdrantClient;
@@ -71,7 +72,7 @@ public class ArticleChunkVectorSyncService {
             return SyncResult.succeeded();
         }
         try {
-            article.ensureCanonicalIdentity();
+            prepareArticleIdentity(article, false);
             List<ArticleChunkEmbedding> embeddings = articleEmbeddingService.generateEmbeddings(article);
             return syncEmbeddings(article, embeddings);
         }
@@ -83,11 +84,31 @@ public class ArticleChunkVectorSyncService {
         }
     }
 
+    public SyncResult syncArticleForBackfill(Article article) {
+        if (article == null) {
+            return SyncResult.failed("回填文章不可以为空");
+        }
+        try {
+            prepareArticleIdentity(article, true);
+            List<ArticleChunkEmbedding> embeddings = articleEmbeddingService.generateEmbeddingsForBackfill(article);
+            if (embeddings.isEmpty()) {
+                return SyncResult.failed(String.format("文章[%s]未生成可写入Qdrant的分块向量，回填跳过。", article.getDocId()));
+            }
+            return syncEmbeddings(article, embeddings);
+        }
+        catch (RuntimeException e) {
+            String detail = String.format("文章[%s]回填分块向量失败: %s",
+                    article.getDocId(), e.getMessage());
+            log.warn(detail);
+            return SyncResult.failed(detail);
+        }
+    }
+
     SyncResult syncEmbeddings(Article article, List<ArticleChunkEmbedding> embeddings) {
         if (article == null || embeddings == null) {
             return SyncResult.succeeded();
         }
-        article.ensureCanonicalIdentity();
+        prepareArticleIdentity(article, false);
         if (StringUtil.isEmpty(article.getDocId())) {
             throw new IllegalArgumentException("article.docId不可以为空");
         }
@@ -279,5 +300,19 @@ public class ArticleChunkVectorSyncService {
         if (value != null) {
             payload.put(key, ValueFactory.value(value.toString()));
         }
+    }
+
+    private void prepareArticleIdentity(Article article, boolean preserveDocId) {
+        if (article == null) {
+            return;
+        }
+        article.setSourceUrl(ArticleIds.canonicalIdentityUrl(article.getSourceUrl()));
+        if (preserveDocId && !StringUtil.isEmpty(article.getDocId())) {
+            return;
+        }
+        article.setDocId(ArticleIds.generateDocId(article.getSourceUrl(),
+                article.getSource(),
+                article.getTitle(),
+                article.getPublishTime()));
     }
 }
