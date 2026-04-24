@@ -1,6 +1,7 @@
 package cn.edu.bistu.cs.ir.index;
 
 import cn.edu.bistu.cs.ir.config.Config;
+import cn.edu.bistu.cs.ir.model.Article;
 import cn.edu.bistu.cs.ir.utils.StringUtil;
 import com.hankcs.lucene.HanLPAnalyzer;
 import org.apache.lucene.analysis.Analyzer;
@@ -22,7 +23,9 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 /**
@@ -94,6 +97,25 @@ public class IdxService implements DisposableBean {
         }
     }
 
+    public List<Article> listStoredArticles() {
+        if (writer == null) {
+            throw new IllegalStateException("Lucene索引不可用，无法回填存量文章向量。");
+        }
+        try (DirectoryReader reader = DirectoryReader.open(writer)) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            TopDocs docs = searcher.search(new MatchAllDocsQuery(), reader.numDocs());
+            List<Article> results = new ArrayList<>(docs.scoreDocs.length);
+            for (ScoreDoc hit : docs.scoreDocs) {
+                results.add(toArticle(searcher.doc(hit.doc)));
+            }
+            results.sort(Comparator.comparing(Article::getDocId, Comparator.nullsLast(String::compareTo)));
+            return List.copyOf(results);
+        }
+        catch (IOException e) {
+            throw new IllegalStateException("无法读取Lucene索引中的存储文章，无法执行向量回填。", e);
+        }
+    }
+
     /**
      * 根据关键词对索引内容进行检索，并将检索结果返回
      * @param kw 待检索的关键词
@@ -125,6 +147,23 @@ public class IdxService implements DisposableBean {
             }
             return results;
         }
+    }
+
+    private Article toArticle(Document doc) {
+        Article article = new Article();
+        article.setDocId(doc.get(ArticleIdxFields.ID));
+        article.setTitle(doc.get(ArticleIdxFields.TITLE));
+        article.setBody(doc.get(ArticleIdxFields.CONTENT));
+        article.setSource(doc.get(ArticleIdxFields.SOURCE));
+        article.setSourceUrl(doc.get(ArticleIdxFields.SOURCE_URL));
+        article.setSection(doc.get(ArticleIdxFields.SECTION));
+        article.setAuthor(doc.get(ArticleIdxFields.AUTHOR));
+        article.setByline(doc.get(ArticleIdxFields.BYLINE));
+        String publishTime = doc.get(ArticleIdxFields.TIME);
+        if (!StringUtil.isEmpty(publishTime)) {
+            article.setPublishTime(Instant.ofEpochMilli(Long.parseLong(publishTime)));
+        }
+        return article;
     }
 
     //TODO 请大家在这里添加更多的检索函数，如针对发表时间的范围检索等，
