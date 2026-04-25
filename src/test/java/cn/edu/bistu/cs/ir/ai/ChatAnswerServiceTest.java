@@ -67,7 +67,7 @@ class ChatAnswerServiceTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("基于片段整理的答案[1]", result.getAnswer()),
+                () -> Assertions.assertEquals("【本次回答基于知识库检索结果生成】基于片段整理的答案[1]", result.getAnswer()),
                 () -> Assertions.assertEquals(1, result.getCitations().size()),
                 () -> Assertions.assertEquals("chunk-1", result.getCitations().getFirst().getChunkId()),
                 () -> Assertions.assertTrue(promptRef.get().getContents().contains("请基于给定片段回答问题")),
@@ -144,7 +144,7 @@ class ChatAnswerServiceTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("Gemini整理的答案[1]", result.getAnswer()),
+                () -> Assertions.assertEquals("【本次回答基于知识库检索结果生成】Gemini整理的答案[1]", result.getAnswer()),
                 () -> Assertions.assertEquals(1, result.getCitations().size()),
                 () -> Assertions.assertEquals("chunk-1", result.getCitations().getFirst().getChunkId())
         );
@@ -449,7 +449,7 @@ class ChatAnswerServiceTest {
     }
 
     @Test
-    void askPrependsNonVectorEvidencePrefixWhenOnlyLexicallyGroundedChunksAreCited() throws Exception {
+    void askPrependsKnowledgeBaseAnswerPrefixWhenOnlyLexicallyGroundedChunksAreCited() throws Exception {
         HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
         ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
         @SuppressWarnings("unchecked")
@@ -479,7 +479,7 @@ class ChatAnswerServiceTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("【非向量证据回答】这是仅词法证据支撑的答案[2]", result.getAnswer()),
+                () -> Assertions.assertEquals("【本次回答基于知识库检索结果生成】这是仅词法证据支撑的答案[2]", result.getAnswer()),
                 () -> Assertions.assertEquals(1, result.getCitations().size()),
                 () -> Assertions.assertEquals("chunk-2", result.getCitations().getFirst().getChunkId())
         );
@@ -584,7 +584,7 @@ class ChatAnswerServiceTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("【非向量证据回答】这是补充引用后的词法答案[2]", result.getAnswer()),
+                () -> Assertions.assertEquals("【本次回答基于知识库检索结果生成】这是补充引用后的词法答案[2]", result.getAnswer()),
                 () -> Assertions.assertEquals(1, result.getCitations().size()),
                 () -> Assertions.assertEquals("chunk-2", result.getCitations().getFirst().getChunkId())
         );
@@ -619,7 +619,7 @@ class ChatAnswerServiceTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("这是补充引用后的混合检索答案[1]", result.getAnswer()),
+                () -> Assertions.assertEquals("【本次回答基于知识库检索结果生成】这是补充引用后的混合检索答案[1]", result.getAnswer()),
                 () -> Assertions.assertEquals(1, result.getCitations().size()),
                 () -> Assertions.assertEquals("chunk-1", result.getCitations().getFirst().getChunkId()),
                 () -> Assertions.assertEquals(Integer.valueOf(1), result.getCitations().getFirst().getVectorRank())

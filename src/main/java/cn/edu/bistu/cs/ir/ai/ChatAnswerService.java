@@ -33,7 +33,7 @@ public class ChatAnswerService {
 
     private static final Logger log = LoggerFactory.getLogger(ChatAnswerService.class);
     private static final String INSUFFICIENT_EVIDENCE_ANSWER = "证据不足";
-    private static final String NON_VECTOR_EVIDENCE_PREFIX = "【非向量证据回答】";
+    private static final String KNOWLEDGE_BASE_ANSWER_PREFIX = "【本次回答基于知识库检索结果生成】";
     private static final Pattern CITATION_MARKER_PATTERN = Pattern.compile("\\[(\\d+)]");
     private static final Pattern HALLUCINATION_DISCLAIMER_PATTERN = Pattern.compile(
             "(片段|参考|资料|文献|信息|文本|文章).*?(没有|未)(能)?(明确)?(提到|提及|提供|给出|包含|说明|表明|发现|找到)|" +
@@ -310,9 +310,8 @@ public class ChatAnswerService {
             result.setAnswer(INSUFFICIENT_EVIDENCE_ANSWER);
             return;
         }
-        boolean vectorGrounded = citedChunks.stream().anyMatch(chunk -> chunk.getVectorRank() != null);
-        if (!vectorGrounded && !result.getAnswer().startsWith(NON_VECTOR_EVIDENCE_PREFIX)) {
-            result.setAnswer(NON_VECTOR_EVIDENCE_PREFIX + result.getAnswer());
+        if (!result.getAnswer().startsWith(KNOWLEDGE_BASE_ANSWER_PREFIX)) {
+            result.setAnswer(KNOWLEDGE_BASE_ANSWER_PREFIX + result.getAnswer());
         }
     }
 
