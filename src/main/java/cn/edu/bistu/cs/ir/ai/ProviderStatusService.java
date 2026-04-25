@@ -285,13 +285,16 @@ public class ProviderStatusService {
     }
 
     private String geminiProbePayload(String configuredModel) {
-        return objectMapper.createObjectNode()
-                .putArray("contents")
+        var root = objectMapper.createObjectNode();
+        root.putArray("contents")
                 .addObject()
                 .putArray("parts")
                 .addObject()
-                .put("text", "health-check")
-                .toPrettyString();
+                .put("text", "请只回复：ready");
+        root.putObject("generationConfig")
+                .put("temperature", 0)
+                .put("maxOutputTokens", 1);
+        return root.toPrettyString();
     }
 
     private String geminiGenerateContentUrl() {
