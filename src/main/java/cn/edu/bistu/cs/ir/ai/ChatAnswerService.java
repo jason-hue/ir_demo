@@ -10,6 +10,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.ollama.api.OllamaOptions;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
@@ -84,6 +85,7 @@ public class ChatAnswerService {
         this(hybridRetrievalService, providerStatusService, aiProperties, chatModelProvider, null);
     }
 
+    @Autowired
     public ChatAnswerService(HybridRetrievalService hybridRetrievalService,
                              ProviderStatusService providerStatusService,
                              AiProperties aiProperties,
