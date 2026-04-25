@@ -88,6 +88,10 @@ public class GeminiChatClient {
         if (gemini.getMaxOutputTokens() != null) {
             generationConfig.put("maxOutputTokens", gemini.getMaxOutputTokens());
         }
+        if (gemini.getThinkingBudget() != null) {
+            generationConfig.putObject("thinkingConfig")
+                    .put("thinkingBudget", gemini.getThinkingBudget());
+        }
         return objectMapper.writeValueAsString(root);
     }
 

@@ -89,7 +89,9 @@ public class AiProperties {
 
         private double topP = 0.8d;
 
-        private Integer maxOutputTokens = 256;
+        private Integer maxOutputTokens = 512;
+
+        private Integer thinkingBudget = 0;
     }
 
     @Getter

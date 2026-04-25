@@ -20,6 +20,8 @@ class GeminiChatClientTest {
 
     private volatile String lastApiKey;
 
+    private volatile String lastRequestBody;
+
     @AfterEach
     void stopServer() {
         if (server != null) {
@@ -32,6 +34,7 @@ class GeminiChatClientTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1beta/models/gemini-2.0-flash:generateContent", exchange -> {
             lastApiKey = exchange.getRequestHeaders().getFirst("x-goog-api-key");
+            lastRequestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             writeJsonResponse(exchange, 200,
                     "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Gemini答案[1]\"}]}}]}");
         });
@@ -48,7 +51,9 @@ class GeminiChatClientTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertEquals("Gemini答案[1]", answer),
-                () -> Assertions.assertEquals("demo-key", lastApiKey)
+                () -> Assertions.assertEquals("demo-key", lastApiKey),
+                () -> Assertions.assertTrue(lastRequestBody.contains("\"maxOutputTokens\":512")),
+                () -> Assertions.assertTrue(lastRequestBody.contains("\"thinkingConfig\":{\"thinkingBudget\":0}"))
         );
     }
 
