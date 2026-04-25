@@ -15,6 +15,8 @@ import org.mockito.ArgumentMatchers;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -54,8 +56,6 @@ import static org.mockito.Mockito.when;
 class HybridChatEndpointDegradedTest {
 
     private static final String TEST_HOME = "workspace/test-task9-endpoints";
-
-    private static final String NO_DATA_HINT = "\n\n提示：知识库中未检索到相关数据，以上回答由模型基于通用知识生成，未基于库内证据。";
 
     private static final String CONFIG_DISABLED_DETAIL = "Qdrant vector support is disabled by configuration.";
 
@@ -171,10 +171,16 @@ class HybridChatEndpointDegradedTest {
         );
     }
 
-    @Test
-    void chatEndpointReturnsSuccessPayloadWhenRetrievalIsEmptyAndChatModelIsAvailable() {
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "qwertyuiopasdfghjkl",
+            "zzqvbnm12345-nohit",
+            "unmatched-topic-alpha-0425",
+            "nohit-corpus-sentinel-xyz"
+    })
+    void chatEndpointReturnsInsufficientEvidenceWhenRetrievalIsEmpty(String question) {
         ChatAskRequest request = new ChatAskRequest();
-        request.setQuestion("qwertyuiopasdfghjkl");
+        request.setQuestion(question);
 
         doReturn(new ProviderStatusSnapshot(
                 new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
@@ -182,9 +188,6 @@ class HybridChatEndpointDegradedTest {
                 new ProviderStatus("qdrant", ProviderAvailabilityState.DISABLED, false, CONFIG_DISABLED_DETAIL),
                 false,
                 AiFallbackMode.LEXICAL_ONLY)).when(providerStatusService).snapshot();
-        when(chatModel.call(ArgumentMatchers.any(Prompt.class))).thenReturn(
-                new ChatResponse(java.util.List.of(new Generation(new AssistantMessage("这是模型基于通用知识生成的回答")))));
-
         ResponseEntity<QueryResponse<ChatAnswerResult>> response = restTemplate.exchange(
                 "/chat/ask",
                 HttpMethod.POST,
@@ -199,9 +202,9 @@ class HybridChatEndpointDegradedTest {
                 () -> Assertions.assertTrue(response.getBody().isSuccess()),
                 () -> Assertions.assertNotNull(response.getBody().getData()),
                 () -> Assertions.assertTrue(response.getBody().getData().isAnswerAvailable()),
+                () -> Assertions.assertEquals("证据不足", response.getBody().getData().getAnswer()),
                 () -> Assertions.assertEquals("lexical_only", response.getBody().getData().getRetrievalMode()),
-                () -> Assertions.assertTrue(response.getBody().getData().getCitations().isEmpty()),
-                () -> Assertions.assertTrue(response.getBody().getData().getAnswer().contains(NO_DATA_HINT))
+                () -> Assertions.assertTrue(response.getBody().getData().getCitations().isEmpty())
         );
     }
 

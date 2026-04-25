@@ -33,8 +33,13 @@ public class ChatAnswerService {
     private static final Logger log = LoggerFactory.getLogger(ChatAnswerService.class);
     private static final String INSUFFICIENT_EVIDENCE_ANSWER = "证据不足";
     private static final String NON_VECTOR_EVIDENCE_PREFIX = "【非向量证据回答】";
-    private static final String EMPTY_RETRIEVAL_HINT_SUFFIX = "\n\n提示：知识库中未检索到相关数据，以上回答由模型基于通用知识生成，未基于库内证据。";
     private static final Pattern CITATION_MARKER_PATTERN = Pattern.compile("\\[(\\d+)]");
+    private static final Pattern HALLUCINATION_DISCLAIMER_PATTERN = Pattern.compile(
+            "(片段|参考|资料|文献|信息|文本|文章).*?(没有|未)(能)?(明确)?(提到|提及|提供|给出|包含|说明|表明|发现|找到)|" +
+            "(没有|未)(能)?(明确)?(提到|提及|提供|给出|包含|说明|表明|发现|找到).*?(片段|参考|资料|文献|信息|文本|文章)|" +
+            "(没有|未)(任何|有)?(明确)?(证据|信息)(表明|证明|显示|说明)|" +
+            "证据不足|无法判断|无法从|无法直接|没有相关信息|不知|无法回答"
+    );
     private static final int MAX_CITATION_REPAIR_ATTEMPTS = 1;
     private static final String CHAT_TIMEOUT_MESSAGE_PREFIX = "聊天模型调用超时";
     static final long REQUEST_TIMEOUT_GUARD_BAND_MILLIS_FLOOR = 50L;
@@ -45,6 +50,10 @@ public class ChatAnswerService {
     private final ProviderStatusService providerStatusService;
 
     private final ObjectProvider<ChatModel> chatModelProvider;
+
+    private final ObjectProvider<GeminiChatClient> geminiChatClientProvider;
+
+    private final String chatProvider;
 
     private final Duration chatTimeout;
 
@@ -64,14 +73,25 @@ public class ChatAnswerService {
 
     private final double chatTopP;
 
+    private final Duration geminiChatTimeout;
+
     private final ExecutorService chatCallExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    ChatAnswerService(HybridRetrievalService hybridRetrievalService,
+                      ProviderStatusService providerStatusService,
+                      AiProperties aiProperties,
+                      ObjectProvider<ChatModel> chatModelProvider) {
+        this(hybridRetrievalService, providerStatusService, aiProperties, chatModelProvider, null);
+    }
 
     public ChatAnswerService(HybridRetrievalService hybridRetrievalService,
                              ProviderStatusService providerStatusService,
                              AiProperties aiProperties,
-                             ObjectProvider<ChatModel> chatModelProvider) {
+                             ObjectProvider<ChatModel> chatModelProvider,
+                             ObjectProvider<GeminiChatClient> geminiChatClientProvider) {
         this.hybridRetrievalService = hybridRetrievalService;
         this.providerStatusService = providerStatusService;
+        this.chatProvider = aiProperties.getChatProvider();
         this.chatTimeout = aiProperties.getOllama().getChatTimeout();
         this.chatContextTopK = aiProperties.getOllama().getChatContextTopK();
         this.chatChunkCharLimit = aiProperties.getOllama().getChatChunkCharLimit();
@@ -82,6 +102,8 @@ public class ChatAnswerService {
         this.chatTemperature = aiProperties.getOllama().getChatTemperature();
         this.chatTopP = aiProperties.getOllama().getChatTopP();
         this.chatModelProvider = chatModelProvider;
+        this.geminiChatClientProvider = geminiChatClientProvider;
+        this.geminiChatTimeout = aiProperties.getGemini().getChatTimeout();
     }
 
     public ChatAnswerResult ask(String question) throws Exception {
@@ -89,60 +111,38 @@ public class ChatAnswerService {
         if (normalizedQuestion.isEmpty()) {
             throw new IllegalArgumentException("question不可以为空");
         }
-        long deadlineNanos = System.nanoTime() + chatTimeout.toNanos();
+        Duration activeChatTimeout = isGeminiProvider() ? geminiChatTimeout : chatTimeout;
+        long deadlineNanos = System.nanoTime() + activeChatTimeout.toNanos();
 
         ChatAnswerResult result = new ChatAnswerResult();
         result.setQuestion(normalizedQuestion);
-
-        ChatModel chatModel = chatModelProvider.getIfAvailable();
-        ProviderStatusSnapshot snapshot = providerStatusService.snapshot();
-        if (chatModel == null || snapshot.ollamaChat().state() != ProviderAvailabilityState.AVAILABLE) {
-            result.setAnswerAvailable(false);
-            result.setDegradedReason(snapshot.ollamaChat().detail());
-            return result;
-        }
 
         HybridRetrievalResult retrieval = hybridRetrievalService.retrieve(normalizedQuestion, 1, chatContextTopK);
         result.setRetrievalMode(retrieval.getMode());
 
         if (retrieval.getResults() == null || retrieval.getResults().isEmpty()) {
             result.setCitations(List.of());
-            try {
-                Prompt prompt = new Prompt(buildEmptyRetrievalPrompt(normalizedQuestion, retrieval.getMode()), buildChatOptions());
-                ChatResponse response = callChatModelWithTimeout(chatModel, prompt, remainingChatBudget(deadlineNanos));
-                Generation generation = response == null ? null : response.getResult();
-                AssistantMessage message = generation == null ? null : generation.getOutput();
-                String answer = message == null ? null : message.getText();
-                result.setAnswerAvailable(answer != null && !answer.isBlank());
-                result.setAnswer(result.isAnswerAvailable() ? answer + EMPTY_RETRIEVAL_HINT_SUFFIX : answer);
-                if (!result.isAnswerAvailable()) {
-                    result.setDegradedReason("聊天模型未返回可用答案");
-                    clearRetrievalContext(result);
-                }
-                return result;
-            }
-            catch (RuntimeException e) {
-                log.warn("聊天模型调用失败，返回可校验降级结果: {}", e.getMessage());
-                result.setAnswerAvailable(false);
-                result.setDegradedReason(e.getMessage() == null || e.getMessage().isBlank()
-                        ? "聊天模型调用失败"
-                        : e.getMessage());
-                clearRetrievalContext(result);
-                return result;
-            }
+            result.setAnswerAvailable(true);
+            result.setAnswer(INSUFFICIENT_EVIDENCE_ANSWER);
+            return result;
+        }
+
+        ProviderStatusSnapshot snapshot = providerStatusService.snapshot();
+        if (snapshot.ollamaChat().state() != ProviderAvailabilityState.AVAILABLE) {
+            result.setAnswerAvailable(false);
+            result.setDegradedReason(snapshot.ollamaChat().detail());
+            clearRetrievalContext(result);
+            return result;
         }
 
         result.setCitations(retrieval.getResults());
 
         try {
-            Prompt prompt = new Prompt(buildPrompt(normalizedQuestion, retrieval.getResults(), retrieval.getMode()), buildChatOptions());
-            ChatResponse response = callChatModelWithTimeout(chatModel, prompt, remainingChatBudget(deadlineNanos));
-            Generation generation = response == null ? null : response.getResult();
-            AssistantMessage message = generation == null ? null : generation.getOutput();
-            result.setAnswerAvailable(message != null && message.getText() != null && !message.getText().isBlank());
-            result.setAnswer(message == null ? null : message.getText());
+            result.setAnswer(callActiveChat(buildPrompt(normalizedQuestion, retrieval.getResults(), retrieval.getMode()),
+                    remainingChatBudget(deadlineNanos)));
+            result.setAnswerAvailable(result.getAnswer() != null && !result.getAnswer().isBlank());
             if (result.isAnswerAvailable()) {
-                attemptCitationRepair(chatModel, normalizedQuestion, retrieval, result, deadlineNanos);
+                attemptCitationRepair(normalizedQuestion, retrieval, result, deadlineNanos);
                 applyCitationProvenance(result, retrieval.getResults());
             }
             if (!result.isAnswerAvailable()) {
@@ -189,6 +189,26 @@ public class ChatAnswerService {
         }
     }
 
+    private String callActiveChat(String promptText, Duration timeoutBudget) {
+        if (isGeminiProvider()) {
+            GeminiChatClient geminiChatClient = geminiChatClientProvider == null ? null : geminiChatClientProvider.getIfAvailable();
+            if (geminiChatClient == null) {
+                throw new IllegalStateException("Gemini chat client is unavailable");
+            }
+            return geminiChatClient.generate(promptText, timeoutBudget);
+        }
+
+        ChatModel chatModel = chatModelProvider.getIfAvailable();
+        if (chatModel == null) {
+            throw new IllegalStateException("聊天模型不可用");
+        }
+        Prompt prompt = new Prompt(promptText, buildChatOptions());
+        ChatResponse response = callChatModelWithTimeout(chatModel, prompt, timeoutBudget);
+        Generation generation = response == null ? null : response.getResult();
+        AssistantMessage message = generation == null ? null : generation.getOutput();
+        return message == null ? null : message.getText();
+    }
+
     private Duration remainingChatBudget(long deadlineNanos) {
         long remainingNanos = deadlineNanos - System.nanoTime() - chatTimeoutGuardBandNanos();
         if (remainingNanos <= 0L) {
@@ -198,11 +218,13 @@ public class ChatAnswerService {
     }
 
     private IllegalStateException exhaustedChatBudgetException(Throwable cause) {
-        return new IllegalStateException(CHAT_TIMEOUT_MESSAGE_PREFIX + "，已在" + formatTimeout(chatTimeout) + "后返回降级结果", cause);
+        Duration activeChatTimeout = isGeminiProvider() ? geminiChatTimeout : chatTimeout;
+        return new IllegalStateException(CHAT_TIMEOUT_MESSAGE_PREFIX + "，已在" + formatTimeout(activeChatTimeout) + "后返回降级结果", cause);
     }
 
     protected long chatTimeoutGuardBandNanos() {
-        return requestTimeoutGuardBandNanos(chatTimeout);
+        Duration activeChatTimeout = isGeminiProvider() ? geminiChatTimeout : chatTimeout;
+        return requestTimeoutGuardBandNanos(activeChatTimeout);
     }
 
     private long requestTimeoutGuardBandNanos(Duration timeout) {
@@ -225,15 +247,14 @@ public class ChatAnswerService {
         result.setCitations(List.of());
     }
 
-    private void attemptCitationRepair(ChatModel chatModel,
-                                       String question,
+    private void attemptCitationRepair(String question,
                                        HybridRetrievalResult retrieval,
                                        ChatAnswerResult result,
                                        long deadlineNanos) {
         if (!shouldAttemptCitationRepair(retrieval, result.getAnswer())) {
             return;
         }
-        String repairedAnswer = tryRepairCitationAnswer(chatModel, question, retrieval.getResults(), result.getAnswer(), deadlineNanos);
+        String repairedAnswer = tryRepairCitationAnswer(question, retrieval.getResults(), result.getAnswer(), deadlineNanos);
         if (repairedAnswer != null && !repairedAnswer.isBlank()) {
             result.setAnswer(repairedAnswer);
         }
@@ -248,19 +269,15 @@ public class ChatAnswerService {
                 && resolveCitedChunks(answer, retrieval.getResults()).isEmpty();
     }
 
-    private String tryRepairCitationAnswer(ChatModel chatModel,
-                                           String question,
+    private String tryRepairCitationAnswer(String question,
                                            List<HybridChunkResult> retrievalResults,
                                            String originalAnswer,
                                            long deadlineNanos) {
         String repairedAnswer = originalAnswer;
         for (int attempt = 0; attempt < MAX_CITATION_REPAIR_ATTEMPTS; attempt++) {
             try {
-                Prompt repairPrompt = new Prompt(buildCitationRepairPrompt(question, originalAnswer, retrievalResults), buildChatOptions());
-                ChatResponse repairResponse = callChatModelWithTimeout(chatModel, repairPrompt, remainingChatBudget(deadlineNanos));
-                Generation repairGeneration = repairResponse == null ? null : repairResponse.getResult();
-                AssistantMessage repairMessage = repairGeneration == null ? null : repairGeneration.getOutput();
-                String candidateAnswer = repairMessage == null ? null : repairMessage.getText();
+                String candidateAnswer = callActiveChat(buildCitationRepairPrompt(question, originalAnswer, retrievalResults),
+                        remainingChatBudget(deadlineNanos));
                 if (candidateAnswer == null || candidateAnswer.isBlank()) {
                     return repairedAnswer;
                 }
@@ -301,6 +318,9 @@ public class ChatAnswerService {
         if (answer == null || answer.isBlank() || retrievalResults == null || retrievalResults.isEmpty()) {
             return List.of();
         }
+        if (HALLUCINATION_DISCLAIMER_PATTERN.matcher(answer).find()) {
+            return List.of();
+        }
         Matcher matcher = CITATION_MARKER_PATTERN.matcher(answer);
         Set<Integer> citedIndexes = new LinkedHashSet<>();
         while (matcher.find()) {
@@ -330,54 +350,38 @@ public class ChatAnswerService {
         return options;
     }
 
+    private boolean isGeminiProvider() {
+        return "gemini".equalsIgnoreCase(chatProvider);
+    }
+
     String buildPrompt(String question, List<HybridChunkResult> chunks, String retrievalMode) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("你是信息检索问答助手。请严格基于给定检索片段回答问题。")
-                .append("\n如果证据不足，请只明确回答“证据不足”。")
-                .append("\n请使用简洁中文作答，并在答案中使用[1]、[2]引用片段编号。")
-                .append("\n检索模式: ").append(retrievalMode)
+        prompt.append("你是问答助手。请基于给定片段回答问题。")
+                .append("\n如果片段没有提供答案，只回复“证据不足”。")
+                .append("\n用自己的话总结答案，在相关句子末尾加上[1]、[2]等编号表示信息来源。")
+                .append("\n\n检索模式: ").append(retrievalMode)
                 .append("\n问题: ").append(question)
-                .append("\n\n参考片段:\n");
+                .append("\n\n片段:\n");
         int limit = Math.min(chunks.size(), chatContextTopK);
         for (int i = 0; i < limit; i++) {
             HybridChunkResult chunk = chunks.get(i);
             prompt.append("[").append(i + 1).append("] ")
-                    .append(firstNonBlank(chunk.getTitle(), "无标题"))
-                    .append(" | ")
-                    .append(firstNonBlank(chunk.getSource(), "未知来源"))
-                    .append("\n")
                     .append(firstNonBlank(truncate(chunk.getChunkText(), chatChunkCharLimit), "无片段内容"))
                     .append("\n\n");
         }
         return prompt.toString();
     }
 
-    String buildEmptyRetrievalPrompt(String question, String retrievalMode) {
-        return new StringBuilder()
-                .append("你是信息检索问答助手。当前知识库未检索到与问题直接相关的片段。")
-                .append("\n请基于你的通用知识直接回答用户问题，不要声称答案来自知识库，不要编造“已检索到资料”或伪造引用编号。")
-                .append("\n请使用简洁中文作答。")
-                .append("\n问题: ").append(question)
-                .toString();
-    }
-
     String buildCitationRepairPrompt(String question, String answer, List<HybridChunkResult> chunks) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("你是信息检索问答助手。下面给定了问题、原始答案和编号参考片段。")
-                .append("\n请保留原始答案的事实内容，仅补充或修正有效的片段引用编号。")
-                .append("\n只允许使用方括号数字引用，例如[1]、[2]，且编号必须来自给定参考片段。")
-                .append("\n如果无法为答案补充有效引用，请只回答“证据不足”。")
+        prompt.append("请为原始答案添加[1]、[2]这样的片段编号。如果答案与片段无关，只回复“证据不足”。\n")
                 .append("\n问题: ").append(question)
                 .append("\n原始答案: ").append(answer)
-                .append("\n\n参考片段:\n");
+                .append("\n\n片段:\n");
         int limit = Math.min(chunks.size(), chatContextTopK);
         for (int i = 0; i < limit; i++) {
             HybridChunkResult chunk = chunks.get(i);
             prompt.append("[").append(i + 1).append("] ")
-                    .append(firstNonBlank(chunk.getTitle(), "无标题"))
-                    .append(" | ")
-                    .append(firstNonBlank(chunk.getSource(), "未知来源"))
-                    .append("\n")
                     .append(firstNonBlank(truncate(chunk.getChunkText(), chatChunkCharLimit), "无片段内容"))
                     .append("\n\n");
         }

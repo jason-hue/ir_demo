@@ -3,6 +3,8 @@ package cn.edu.bistu.cs.ir.ai;
 import cn.edu.bistu.cs.ir.config.AiProperties;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -29,8 +31,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ChatAnswerServiceTest {
-
-    private static final String NO_DATA_HINT = "\n\n提示：知识库中未检索到相关数据，以上回答由模型基于通用知识生成，未基于库内证据。";
 
     private static final String CONFIG_DISABLED_DETAIL = "Qdrant vector support is disabled by configuration.";
 
@@ -70,11 +70,11 @@ class ChatAnswerServiceTest {
                 () -> Assertions.assertEquals("基于片段整理的答案[1]", result.getAnswer()),
                 () -> Assertions.assertEquals(1, result.getCitations().size()),
                 () -> Assertions.assertEquals("chunk-1", result.getCitations().getFirst().getChunkId()),
-                () -> Assertions.assertTrue(promptRef.get().getContents().contains("请严格基于给定检索片段回答问题")),
-                () -> Assertions.assertTrue(promptRef.get().getContents().contains("如果证据不足，请只明确回答“证据不足”")),
-                () -> Assertions.assertTrue(promptRef.get().getContents().contains("[4] 标题-4")),
+                () -> Assertions.assertTrue(promptRef.get().getContents().contains("请基于给定片段回答问题")),
+                () -> Assertions.assertTrue(promptRef.get().getContents().contains("如果片段没有提供答案，只回复“证据不足”")),
+                () -> Assertions.assertTrue(promptRef.get().getContents().contains("[4] 片段内容-4")),
                 () -> Assertions.assertFalse(promptRef.get().getContents().contains("[5] 标题-5")),
-                () -> Assertions.assertTrue(promptRef.get().getContents().contains("在答案中使用[1]、[2]引用片段编号")),
+                () -> Assertions.assertTrue(promptRef.get().getContents().contains("在相关句子末尾加上[1]、[2]等编号表示信息来源")),
                 () -> Assertions.assertFalse(promptRef.get().getContents().contains("120字以内")),
                 () -> Assertions.assertInstanceOf(OllamaOptions.class, promptRef.get().getOptions()),
                 () -> Assertions.assertEquals(96, ((OllamaOptions) promptRef.get().getOptions()).getNumPredict()),
@@ -97,6 +97,7 @@ class ChatAnswerServiceTest {
                 new ProviderStatus("qdrant", ProviderAvailabilityState.AVAILABLE, true, "ok"),
                 false,
                 AiFallbackMode.LEXICAL_ONLY));
+        when(hybridRetrievalService.retrieve("请总结腾讯新闻中的AI相关新闻", 1, 4)).thenReturn(hybridResult());
         when(chatModelProvider.getIfAvailable()).thenReturn(null);
 
         ChatAnswerService service = new ChatAnswerService(hybridRetrievalService,
@@ -111,7 +112,111 @@ class ChatAnswerServiceTest {
                 () -> Assertions.assertNull(result.getRetrievalMode()),
                 () -> Assertions.assertTrue(result.getCitations().isEmpty())
         );
-        verify(hybridRetrievalService, never()).retrieve(anyString(), anyInt(), anyInt());
+        verify(hybridRetrievalService).retrieve("请总结腾讯新闻中的AI相关新闻", 1, 4);
+    }
+
+    @Test
+    void askUsesGeminiClientWhenGeminiIsActiveChatProvider() throws Exception {
+        HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
+        ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ChatModel> chatModelProvider = mock(ObjectProvider.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<GeminiChatClient> geminiChatClientProvider = mock(ObjectProvider.class);
+        GeminiChatClient geminiChatClient = mock(GeminiChatClient.class);
+
+        when(hybridRetrievalService.retrieve("请总结腾讯新闻中的AI相关新闻", 1, 4)).thenReturn(hybridResult());
+        when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
+                new ProviderStatus("gemini-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("qdrant", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                true,
+                AiFallbackMode.AI_READY));
+        when(geminiChatClientProvider.getIfAvailable()).thenReturn(geminiChatClient);
+        when(geminiChatClient.generate(anyString(), any())).thenReturn("Gemini整理的答案[1]");
+
+        ChatAnswerService service = new ChatAnswerService(hybridRetrievalService,
+                providerStatusService,
+                aiProperties("gemini"),
+                chatModelProvider,
+                geminiChatClientProvider);
+        ChatAnswerResult result = service.ask("请总结腾讯新闻中的AI相关新闻");
+
+        Assertions.assertAll(
+                () -> Assertions.assertTrue(result.isAnswerAvailable()),
+                () -> Assertions.assertEquals("Gemini整理的答案[1]", result.getAnswer()),
+                () -> Assertions.assertEquals(1, result.getCitations().size()),
+                () -> Assertions.assertEquals("chunk-1", result.getCitations().getFirst().getChunkId())
+        );
+        verify(geminiChatClient).generate(anyString(), any());
+        verify(chatModelProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void askReturnsDegradedResultWhenGeminiIsActiveButUnavailable() throws Exception {
+        HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
+        ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ChatModel> chatModelProvider = mock(ObjectProvider.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<GeminiChatClient> geminiChatClientProvider = mock(ObjectProvider.class);
+
+        when(hybridRetrievalService.retrieve("请总结腾讯新闻中的AI相关新闻", 1, 4)).thenReturn(hybridResult());
+        when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
+                new ProviderStatus("gemini-chat", ProviderAvailabilityState.UNAVAILABLE, true, "Gemini API key is not configured."),
+                new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("qdrant", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                true,
+                AiFallbackMode.LEXICAL_ONLY));
+
+        ChatAnswerService service = new ChatAnswerService(hybridRetrievalService,
+                providerStatusService,
+                aiProperties("gemini"),
+                chatModelProvider,
+                geminiChatClientProvider);
+        ChatAnswerResult result = service.ask("请总结腾讯新闻中的AI相关新闻");
+
+        Assertions.assertAll(
+                () -> Assertions.assertFalse(result.isAnswerAvailable()),
+                () -> Assertions.assertEquals("Gemini API key is not configured.", result.getDegradedReason()),
+                () -> Assertions.assertNull(result.getRetrievalMode()),
+                () -> Assertions.assertTrue(result.getCitations().isEmpty())
+        );
+        verify(geminiChatClientProvider, never()).getIfAvailable();
+        verify(chatModelProvider, never()).getIfAvailable();
+    }
+
+    @Test
+    void askReturnsInsufficientEvidenceWhenRetrievalIsEmptyEvenIfChatModelIsUnavailable() throws Exception {
+        HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
+        ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ChatModel> chatModelProvider = mock(ObjectProvider.class);
+
+        when(hybridRetrievalService.retrieve("qwertyuiopasdfghjkl", 1, 4)).thenReturn(emptyLexicalOnlyResult());
+        when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
+                new ProviderStatus("ollama-chat", ProviderAvailabilityState.UNAVAILABLE, false, "ollama chat unavailable"),
+                new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("qdrant", ProviderAvailabilityState.DISABLED, false, CONFIG_DISABLED_DETAIL),
+                false,
+                AiFallbackMode.LEXICAL_ONLY));
+        when(chatModelProvider.getIfAvailable()).thenReturn(null);
+
+        ChatAnswerService service = new ChatAnswerService(hybridRetrievalService,
+                providerStatusService,
+                aiProperties(),
+                chatModelProvider);
+        ChatAnswerResult result = service.ask("qwertyuiopasdfghjkl");
+
+        Assertions.assertAll(
+                () -> Assertions.assertTrue(result.isAnswerAvailable()),
+                () -> Assertions.assertEquals("证据不足", result.getAnswer()),
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getRetrievalMode()),
+                () -> Assertions.assertTrue(result.getCitations().isEmpty()),
+                () -> Assertions.assertNull(result.getDegradedReason())
+        );
+        verify(hybridRetrievalService).retrieve("qwertyuiopasdfghjkl", 1, 4);
+        verify(chatModelProvider, never()).getIfAvailable();
     }
 
     @Test
@@ -381,52 +486,13 @@ class ChatAnswerServiceTest {
     }
 
     @Test
-    void askReturnsModelAnswerWithFixedHintWhenRetrievalReturnsNoChunks() throws Exception {
-        HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
-        ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
-        @SuppressWarnings("unchecked")
-        ObjectProvider<ChatModel> chatModelProvider = mock(ObjectProvider.class);
-
-        ChatModel chatModel = new ChatModel() {
-            @Override
-            public ChatResponse call(Prompt prompt) {
-                return new ChatResponse(List.of(new Generation(new AssistantMessage("这是模型基于通用知识生成的回答"))));
-            }
-        };
-
-        when(hybridRetrievalService.retrieve("最近有什么新闻", 1, 4)).thenReturn(emptyLexicalOnlyResult());
-        when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
-                new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
-                new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
-                new ProviderStatus("qdrant", ProviderAvailabilityState.DISABLED, false, CONFIG_DISABLED_DETAIL),
-                false,
-                AiFallbackMode.LEXICAL_ONLY));
-        when(chatModelProvider.getIfAvailable()).thenReturn(chatModel);
-
-        ChatAnswerService service = new ChatAnswerService(hybridRetrievalService,
-                providerStatusService,
-                aiProperties(),
-                chatModelProvider);
-        ChatAnswerResult result = service.ask("最近有什么新闻");
-
-        Assertions.assertAll(
-                () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("这是模型基于通用知识生成的回答" + NO_DATA_HINT, result.getAnswer()),
-                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getRetrievalMode()),
-                () -> Assertions.assertTrue(result.getCitations().isEmpty())
-        );
-    }
-
-    @Test
-    void askKeepsEmptyRetrievalAnswerUntouchedWhenModelEmitsCitationLikeText() throws Exception {
+    void askReturnsInsufficientEvidenceWhenRetrievalReturnsNoChunks() throws Exception {
         HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
         ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
         @SuppressWarnings("unchecked")
         ObjectProvider<ChatModel> chatModelProvider = mock(ObjectProvider.class);
         ChatModel chatModel = mock(ChatModel.class);
 
-        when(chatModel.call(any(Prompt.class))).thenReturn(
-                new ChatResponse(List.of(new Generation(new AssistantMessage("这是模型按通用知识生成的回答[1]")))));
         when(hybridRetrievalService.retrieve("最近有什么新闻", 1, 4)).thenReturn(emptyLexicalOnlyResult());
         when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
                 new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
@@ -444,11 +510,50 @@ class ChatAnswerServiceTest {
 
         Assertions.assertAll(
                 () -> Assertions.assertTrue(result.isAnswerAvailable()),
-                () -> Assertions.assertEquals("这是模型按通用知识生成的回答[1]" + NO_DATA_HINT, result.getAnswer()),
+                () -> Assertions.assertEquals("证据不足", result.getAnswer()),
                 () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getRetrievalMode()),
                 () -> Assertions.assertTrue(result.getCitations().isEmpty())
         );
-        verify(chatModel, times(1)).call(any(Prompt.class));
+        verify(chatModel, never()).call(any(Prompt.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "最近有什么新闻",
+            "qwertyuiopasdfghjkl",
+            "这个系统已经上线全校了吗",
+            "是否支持实时全网新闻",
+            "人工智能最新进展是什么"
+    })
+    void askReturnsInsufficientEvidenceForManyEmptyRetrievalQuestions(String question) throws Exception {
+        HybridRetrievalService hybridRetrievalService = mock(HybridRetrievalService.class);
+        ProviderStatusService providerStatusService = mock(ProviderStatusService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ChatModel> chatModelProvider = mock(ObjectProvider.class);
+        ChatModel chatModel = mock(ChatModel.class);
+
+        when(hybridRetrievalService.retrieve(question, 1, 4)).thenReturn(emptyLexicalOnlyResult());
+        when(providerStatusService.snapshot()).thenReturn(new ProviderStatusSnapshot(
+                new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
+                new ProviderStatus("qdrant", ProviderAvailabilityState.DISABLED, false, CONFIG_DISABLED_DETAIL),
+                false,
+                AiFallbackMode.LEXICAL_ONLY));
+        when(chatModelProvider.getIfAvailable()).thenReturn(chatModel);
+
+        ChatAnswerService service = new ChatAnswerService(hybridRetrievalService,
+                providerStatusService,
+                aiProperties(),
+                chatModelProvider);
+        ChatAnswerResult result = service.ask(question);
+
+        Assertions.assertAll(
+                () -> Assertions.assertTrue(result.isAnswerAvailable()),
+                () -> Assertions.assertEquals("证据不足", result.getAnswer()),
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getRetrievalMode()),
+                () -> Assertions.assertTrue(result.getCitations().isEmpty())
+        );
+        verify(chatModel, never()).call(any(Prompt.class));
     }
 
     @Test
@@ -607,6 +712,14 @@ class ChatAnswerServiceTest {
 
     private AiProperties aiProperties() {
         return aiProperties(Duration.ofSeconds(25), 4, 320);
+    }
+
+    private AiProperties aiProperties(String chatProvider) {
+        AiProperties properties = aiProperties();
+        properties.setChatProvider(chatProvider);
+        properties.getGemini().setEnabled(true);
+        properties.getGemini().setApiKey("test-gemini-key");
+        return properties;
     }
 
     private AiProperties aiProperties(Duration timeout, int topK, int chunkCharLimit) {
