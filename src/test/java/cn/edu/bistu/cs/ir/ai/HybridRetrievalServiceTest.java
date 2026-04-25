@@ -4,11 +4,14 @@ import cn.edu.bistu.cs.ir.config.AiProperties;
 import cn.edu.bistu.cs.ir.index.IdxService;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.ObjectProvider;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Map;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -19,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -144,6 +148,100 @@ class HybridRetrievalServiceTest {
                 () -> Assertions.assertEquals(
                         "Qdrant is reachable at http://127.0.0.1:6333, but collection 'news article chunks' does not exist.",
                         result.getDegradedReason())
+        );
+    }
+
+    @Test
+    void retrieveKeepsLexicalOnlyWhenVectorMatchesDoNotMeetSimilarityThreshold() throws Exception {
+        IdxService idxService = mock(IdxService.class);
+        ArticleChunkingService chunkingService = mock(ArticleChunkingService.class);
+        ProviderStatusService providerStatusService = TimedHybridRetrievalService.availableProviderStatusService();
+        @SuppressWarnings("unchecked")
+        ObjectProvider<VectorStore> vectorStoreProvider = mock(ObjectProvider.class);
+        VectorStore vectorStore = mock(VectorStore.class);
+        when(vectorStoreProvider.getIfAvailable()).thenReturn(vectorStore);
+        when(vectorStore.similaritySearch(any(SearchRequest.class))).thenAnswer(invocation -> {
+            SearchRequest request = invocation.getArgument(0);
+            if (request.getSimilarityThreshold() >= 0.6d) {
+                return List.of();
+            }
+            return List.of(new org.springframework.ai.document.Document(
+                    "vector-doc-1",
+                    "弱相关片段",
+                    Map.of(
+                            "docId", "vector-doc-1",
+                            "chunkId", "chunk-vector-1",
+                            "title", "陨落不死的诺基亚",
+                            "source", "腾讯新闻",
+                            "sourceUrl", "https://example.com/nokia"
+                    )));
+        });
+
+        HybridRetrievalService service = new HybridRetrievalService(idxService,
+                chunkingService,
+                providerStatusService,
+                vectorStoreProvider,
+                aiProperties(Duration.ofSeconds(120), 0.6d)) {
+            @Override
+            protected List<HybridChunkResult> lexicalRetrieve(String question) {
+                return List.of(chunk("doc-1", "chunk-1", "人工智能词法结果", "https://lexical", "腾讯新闻", 1, null));
+            }
+        };
+
+        HybridRetrievalResult result = service.retrieve("人工智能", 1, 10);
+        ArgumentCaptor<SearchRequest> searchRequestCaptor = ArgumentCaptor.forClass(SearchRequest.class);
+        org.mockito.Mockito.verify(vectorStore).similaritySearch(searchRequestCaptor.capture());
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getMode()),
+                () -> Assertions.assertEquals(1, result.getResults().size()),
+                () -> Assertions.assertEquals("chunk-1", result.getResults().getFirst().getChunkId()),
+                () -> Assertions.assertNull(result.getResults().getFirst().getVectorRank()),
+                () -> Assertions.assertEquals(0.6d, searchRequestCaptor.getValue().getSimilarityThreshold())
+        );
+    }
+
+    @Test
+    void retrieveKeepsLexicalOnlyWhenVectorMatchesLackKeywordEvidence() throws Exception {
+        IdxService idxService = mock(IdxService.class);
+        ArticleChunkingService chunkingService = mock(ArticleChunkingService.class);
+        ProviderStatusService providerStatusService = TimedHybridRetrievalService.availableProviderStatusService();
+        @SuppressWarnings("unchecked")
+        ObjectProvider<VectorStore> vectorStoreProvider = mock(ObjectProvider.class);
+        VectorStore vectorStore = mock(VectorStore.class);
+        when(vectorStoreProvider.getIfAvailable()).thenReturn(vectorStore);
+        when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of(
+                org.springframework.ai.document.Document.builder()
+                        .id("vector-doc-2")
+                        .text("汽车越智能，联网就越多，就越需要通信技术。")
+                        .metadata(Map.of(
+                                "docId", "vector-doc-2",
+                                "chunkId", "chunk-vector-2",
+                                "title", "陨落不死的诺基亚",
+                                "source", "腾讯新闻",
+                                "sourceUrl", "https://example.com/nokia"
+                        ))
+                        .score(0.7003096d)
+                        .build()));
+
+        HybridRetrievalService service = new HybridRetrievalService(idxService,
+                chunkingService,
+                providerStatusService,
+                vectorStoreProvider,
+                aiProperties(Duration.ofSeconds(120), 0.6d)) {
+            @Override
+            protected List<HybridChunkResult> lexicalRetrieve(String question) {
+                return List.of(chunk("doc-1", "chunk-1", "人工智能词法结果", "https://lexical", "腾讯新闻", 1, null));
+            }
+        };
+
+        HybridRetrievalResult result = service.retrieve("人工智能", 1, 10);
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(HybridRetrievalService.MODE_LEXICAL_ONLY, result.getMode()),
+                () -> Assertions.assertEquals(1, result.getResults().size()),
+                () -> Assertions.assertEquals("chunk-1", result.getResults().getFirst().getChunkId()),
+                () -> Assertions.assertNull(result.getResults().getFirst().getVectorRank())
         );
     }
 
@@ -364,8 +462,13 @@ class HybridRetrievalServiceTest {
     }
 
     private static AiProperties aiProperties(Duration vectorTimeout) {
+        return aiProperties(vectorTimeout, 0.6d);
+    }
+
+    private static AiProperties aiProperties(Duration vectorTimeout, double vectorSimilarityThreshold) {
         AiProperties aiProperties = new AiProperties();
         aiProperties.getRetrieval().setVectorTimeout(vectorTimeout);
+        aiProperties.getRetrieval().setVectorSimilarityThreshold(vectorSimilarityThreshold);
         return aiProperties;
     }
 

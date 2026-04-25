@@ -66,6 +66,8 @@ public class HybridRetrievalService {
 
     private final Duration vectorRetrievalTimeout;
 
+    private final double vectorSimilarityThreshold;
+
     public HybridRetrievalService(IdxService idxService,
                                   ArticleChunkingService articleChunkingService,
                                   ProviderStatusService providerStatusService,
@@ -76,6 +78,7 @@ public class HybridRetrievalService {
         this.providerStatusService = providerStatusService;
         this.vectorStoreProvider = vectorStoreProvider;
         this.vectorRetrievalTimeout = aiProperties.getRetrieval().getVectorTimeout();
+        this.vectorSimilarityThreshold = aiProperties.getRetrieval().getVectorSimilarityThreshold();
     }
 
     public HybridRetrievalResult retrieve(String question, int pageNo, int pageSize) throws Exception {
@@ -231,6 +234,7 @@ public class HybridRetrievalService {
     }
 
     protected List<HybridChunkResult> vectorRetrieve(String question) {
+        List<String> queryTerms = tokenize(question);
         VectorStore vectorStore;
         try {
             vectorStore = Objects.requireNonNull(vectorStoreProvider.getIfAvailable(), "VectorStore不可用");
@@ -239,16 +243,40 @@ public class HybridRetrievalService {
             throw new IllegalStateException(resolveFailureMessage(e, "向量检索初始化失败，已退化为词法检索"), e);
         }
         List<org.springframework.ai.document.Document> docs = vectorStore.similaritySearch(
-                SearchRequest.builder().query(question).topK(VECTOR_TOP_K).build());
+                SearchRequest.builder()
+                        .query(question)
+                        .topK(VECTOR_TOP_K)
+                        .similarityThreshold(vectorSimilarityThreshold)
+                        .build());
         if (docs == null || docs.isEmpty()) {
             return List.of();
         }
 
         List<HybridChunkResult> results = new ArrayList<>();
         for (int i = 0; i < docs.size(); i++) {
-            results.add(fromVectorDocument(docs.get(i), i + 1));
+            org.springframework.ai.document.Document document = docs.get(i);
+            if (!hasVectorLexicalEvidence(queryTerms, document)) {
+                continue;
+            }
+            results.add(fromVectorDocument(document, results.size() + 1));
         }
         return List.copyOf(results);
+    }
+
+    private boolean hasVectorLexicalEvidence(List<String> queryTerms, org.springframework.ai.document.Document document) {
+        if (queryTerms.isEmpty()) {
+            return true;
+        }
+        Map<String, Object> metadata = document.getMetadata();
+        String title = normalize(stringMetadata(metadata, "title"));
+        String chunkText = normalize(firstNonBlank(document.getText(),
+                stringMetadata(metadata, ArticleChunkVectorSyncService.CONTENT_FIELD_NAME)));
+        for (String term : queryTerms) {
+            if (countOccurrences(title, term) > 0 || countOccurrences(chunkText, term) > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     List<HybridChunkResult> fuse(List<HybridChunkResult> lexicalResults, List<HybridChunkResult> vectorResults) {
