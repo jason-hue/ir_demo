@@ -13,7 +13,11 @@ import java.time.Duration;
 @Setter
 public class AiProperties {
 
+    private String chatProvider = "ollama";
+
     private Ollama ollama = new Ollama();
+
+    private Gemini gemini = new Gemini();
 
     private Retrieval retrieval = new Retrieval();
 
@@ -26,6 +30,8 @@ public class AiProperties {
     public static class Retrieval {
 
         private Duration vectorTimeout = Duration.ofSeconds(120);
+
+        private double vectorSimilarityThreshold = 0.6d;
     }
 
     @Getter
@@ -63,6 +69,27 @@ public class AiProperties {
         private double chatTemperature = 0.1d;
 
         private double chatTopP = 0.8d;
+    }
+
+    @Getter
+    @Setter
+    public static class Gemini {
+
+        private boolean enabled = false;
+
+        private String baseUrl = "https://generativelanguage.googleapis.com";
+
+        private String apiKey;
+
+        private String model = "gemini-2.0-flash";
+
+        private Duration chatTimeout = Duration.ofSeconds(120);
+
+        private double temperature = 0.1d;
+
+        private double topP = 0.8d;
+
+        private Integer maxOutputTokens = 256;
     }
 
     @Getter

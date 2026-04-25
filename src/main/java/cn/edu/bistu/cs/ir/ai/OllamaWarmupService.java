@@ -42,6 +42,11 @@ public class OllamaWarmupService {
 
     @EventListener(ApplicationReadyEvent.class)
     public void warmOnStartup() {
+        if (!"ollama".equalsIgnoreCase(aiProperties.getChatProvider())) {
+            chatReady.set(true);
+            readinessDetail.set("当前活动聊天提供方不是Ollama，跳过预热");
+            return;
+        }
         if (!aiProperties.getOllama().isWarmupEnabled()) {
             chatReady.set(true);
             readinessDetail.set("聊天模型预热已禁用");
@@ -53,6 +58,9 @@ public class OllamaWarmupService {
     @Scheduled(fixedDelayString = "${irdemo.ai.ollama.keep-warm-interval:PT4M}",
             initialDelayString = "${irdemo.ai.ollama.keep-warm-interval:PT4M}")
     public void keepWarm() {
+        if (!"ollama".equalsIgnoreCase(aiProperties.getChatProvider())) {
+            return;
+        }
         if (!aiProperties.getOllama().isWarmupEnabled()) {
             return;
         }
