@@ -24,6 +24,8 @@ class ProviderStatusServiceDegradedTest {
 
     private volatile String lastMethod;
 
+    private volatile String lastApiKey;
+
     @Test
     void ollamaEmbeddingStatusReturnsDegradedWhenEmbedEndpointFailsAfterModelDiscoverySucceeds() throws Exception {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -55,6 +57,36 @@ class ProviderStatusServiceDegradedTest {
                 () -> Assertions.assertTrue(status.detail().contains("did not respond")),
                 () -> Assertions.assertNull(lastRawPath)
         );
+    }
+
+    @Test
+    void qdrantStatusPreservesInterruptedFlagWhenProbeIsInterrupted() {
+        AiProperties properties = new AiProperties();
+        Object qdrant = ReflectionTestUtils.getField(properties, "qdrant");
+        Object providerStatus = ReflectionTestUtils.getField(properties, "providerStatus");
+        ReflectionTestUtils.setField(qdrant, "enabled", true);
+        ReflectionTestUtils.setField(qdrant, "host", "127.0.0.1");
+        ReflectionTestUtils.setField(qdrant, "httpPort", 1);
+        ReflectionTestUtils.setField(qdrant, "collectionName", "news article chunks");
+        ReflectionTestUtils.setField(providerStatus, "connectTimeout", Duration.ofSeconds(2));
+        ReflectionTestUtils.setField(providerStatus, "readTimeout", Duration.ofMillis(100));
+        ProviderStatusService service = new ProviderStatusService(properties, new ObjectMapper());
+        boolean interruptedBefore = Thread.currentThread().isInterrupted();
+
+        try {
+            Thread.currentThread().interrupt();
+            ProviderStatus status = service.qdrantStatus();
+
+            Assertions.assertAll(
+                    () -> Assertions.assertEquals(ProviderAvailabilityState.UNAVAILABLE, status.state()),
+                    () -> Assertions.assertTrue(Thread.currentThread().isInterrupted())
+            );
+        }
+        finally {
+            if (!interruptedBefore) {
+                Thread.interrupted();
+            }
+        }
     }
 
     @Test
@@ -131,6 +163,80 @@ class ProviderStatusServiceDegradedTest {
         );
     }
 
+    @Test
+    void geminiChatStatusReturnsUnavailableWhenApiKeyIsMissing() {
+        AiProperties properties = new AiProperties();
+        properties.setChatProvider("gemini");
+        properties.getGemini().setEnabled(true);
+        properties.getGemini().setApiKey(null);
+
+        ProviderStatus status = new ProviderStatusService(properties, new ObjectMapper()).geminiChatStatus();
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(ProviderAvailabilityState.UNAVAILABLE, status.state()),
+                () -> Assertions.assertTrue(status.enabled()),
+                () -> Assertions.assertEquals("Gemini API key is not configured.", status.detail())
+        );
+    }
+
+    @Test
+    void snapshotUsesGeminiAsActiveChatProviderWhenConfigured() {
+        server = createGeminiServer(200);
+        server.start();
+
+        AiProperties properties = new AiProperties();
+        properties.setChatProvider("gemini");
+        properties.getOllama().setEnabled(false);
+        properties.getGemini().setEnabled(true);
+        properties.getGemini().setApiKey("demo-key");
+        properties.getGemini().setModel("gemini-2.0-flash");
+        properties.getGemini().setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
+
+        ProviderStatusSnapshot snapshot = new ProviderStatusService(properties, new ObjectMapper()).snapshot();
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals("gemini-chat", snapshot.ollamaChat().provider()),
+                () -> Assertions.assertEquals(ProviderAvailabilityState.AVAILABLE, snapshot.ollamaChat().state()),
+                () -> Assertions.assertEquals(ProviderAvailabilityState.DISABLED, snapshot.ollamaEmbedding().state()),
+                () -> Assertions.assertEquals(AiFallbackMode.LEXICAL_ONLY, snapshot.fallbackMode()),
+                () -> Assertions.assertEquals("/v1beta/models/gemini-2.0-flash:generateContent", lastRawPath),
+                () -> Assertions.assertEquals("POST", lastMethod),
+                () -> Assertions.assertEquals("demo-key", lastApiKey)
+        );
+    }
+
+    @Test
+    void geminiChatStatusReturnsUnavailableWhenProbeReturnsUnauthorized() throws Exception {
+        server = createGeminiServer(401);
+        server.start();
+
+        ProviderStatus status = geminiChatStatusAtPort(server.getAddress().getPort(), Duration.ofSeconds(2));
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(ProviderAvailabilityState.UNAVAILABLE, status.state()),
+                () -> Assertions.assertTrue(status.enabled()),
+                () -> Assertions.assertTrue(status.detail().contains("HTTP 401")),
+                () -> Assertions.assertEquals("/v1beta/models/gemini-2.0-flash:generateContent", lastRawPath),
+                () -> Assertions.assertEquals("POST", lastMethod),
+                () -> Assertions.assertEquals("demo-key", lastApiKey)
+        );
+    }
+
+    @Test
+    void geminiChatStatusReturnsDegradedWhenProbeReturnsServerError() throws Exception {
+        server = createGeminiServer(503);
+        server.start();
+
+        ProviderStatus status = geminiChatStatusAtPort(server.getAddress().getPort(), Duration.ofSeconds(2));
+
+        Assertions.assertAll(
+                () -> Assertions.assertEquals(ProviderAvailabilityState.DEGRADED, status.state()),
+                () -> Assertions.assertTrue(status.enabled()),
+                () -> Assertions.assertTrue(status.detail().contains("HTTP 503")),
+                () -> Assertions.assertEquals("/v1beta/models/gemini-2.0-flash:generateContent", lastRawPath)
+        );
+    }
+
     @AfterEach
     void stopServer() {
         if (server != null) {
@@ -185,6 +291,36 @@ class ProviderStatusServiceDegradedTest {
 
         return new ProviderStatusService(properties, new ObjectMapper())
                 .ollamaEmbeddingStatus(properties.getOllama().getEmbeddingModel());
+    }
+
+    private ProviderStatus geminiChatStatusAtPort(int port, Duration readTimeout) {
+        AiProperties properties = new AiProperties();
+        Object providerStatus = ReflectionTestUtils.getField(properties, "providerStatus");
+        properties.setChatProvider("gemini");
+        properties.getGemini().setEnabled(true);
+        properties.getGemini().setApiKey("demo-key");
+        properties.getGemini().setModel("gemini-2.0-flash");
+        properties.getGemini().setBaseUrl("http://127.0.0.1:" + port);
+        ReflectionTestUtils.setField(providerStatus, "connectTimeout", Duration.ofSeconds(2));
+        ReflectionTestUtils.setField(providerStatus, "readTimeout", readTimeout);
+
+        return new ProviderStatusService(properties, new ObjectMapper()).geminiChatStatus();
+    }
+
+    private HttpServer createGeminiServer(int responseStatus) {
+        try {
+            HttpServer geminiServer = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            geminiServer.createContext("/v1beta/models/gemini-2.0-flash:generateContent", exchange -> {
+                lastRawPath = exchange.getRequestURI().getRawPath();
+                lastMethod = exchange.getRequestMethod();
+                lastApiKey = exchange.getRequestHeaders().getFirst("x-goog-api-key");
+                writeJsonResponse(exchange, responseStatus, "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]}}]}");
+            });
+            return geminiServer;
+        }
+        catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private void writeResponse(HttpExchange exchange, int responseStatus) throws IOException {

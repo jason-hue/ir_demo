@@ -7,6 +7,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.net.ConnectException;
@@ -47,14 +48,67 @@ public class ProviderStatusService {
     }
 
     public ProviderStatusSnapshot snapshot() {
-        ProviderStatus ollamaChat = ollamaModelStatus("ollama-chat", aiProperties.getOllama().getChatModel());
-        ollamaChat = applyWarmupReadiness(ollamaChat);
+        ProviderStatus ollamaChat = activeChatStatus();
         ProviderStatus ollamaEmbedding = ollamaEmbeddingStatus(aiProperties.getOllama().getEmbeddingModel());
         ProviderStatus qdrant = qdrantStatus();
         AiFallbackMode fallbackMode = isAiReady(ollamaChat, ollamaEmbedding, qdrant)
                 ? AiFallbackMode.AI_READY
                 : AiFallbackMode.LEXICAL_ONLY;
         return new ProviderStatusSnapshot(ollamaChat, ollamaEmbedding, qdrant, true, fallbackMode);
+    }
+
+    public ProviderStatus activeChatStatus() {
+        String provider = aiProperties.getChatProvider();
+        if (provider == null || provider.isBlank() || "ollama".equalsIgnoreCase(provider)) {
+            ProviderStatus ollamaChat = ollamaModelStatus("ollama-chat", aiProperties.getOllama().getChatModel());
+            return applyWarmupReadiness(ollamaChat);
+        }
+        if ("gemini".equalsIgnoreCase(provider)) {
+            return geminiChatStatus();
+        }
+        return new ProviderStatus(provider + "-chat", ProviderAvailabilityState.DEGRADED, true,
+                "Unsupported chat provider '" + provider + "'.");
+    }
+
+    public ProviderStatus geminiChatStatus() {
+        if (!aiProperties.getGemini().isEnabled()) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.DISABLED, false,
+                    "Gemini support is disabled by configuration.");
+        }
+        if (!StringUtils.hasText(aiProperties.getGemini().getApiKey())) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "Gemini API key is not configured.");
+        }
+        if (!StringUtils.hasText(aiProperties.getGemini().getModel())) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.DEGRADED, true,
+                    "Gemini model is not configured.");
+        }
+
+        String probeUrl = geminiGenerateContentUrl();
+        ProbeResult probe = httpPost(probeUrl,
+                geminiProbePayload(aiProperties.getGemini().getModel()),
+                aiProperties.getGemini().getApiKey());
+        if (probe.timedOut()) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "Gemini probe timed out after " + formatTimeout(aiProperties.getProviderStatus().getReadTimeout())
+                            + " at " + probeUrl + ".");
+        }
+
+        HttpResponse<String> response = probe.response();
+        if (response == null) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "Gemini did not respond at " + probeUrl + ".");
+        }
+        if (response.statusCode() >= 200 && response.statusCode() < 300) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.AVAILABLE, true,
+                    "Gemini chat model '" + aiProperties.getGemini().getModel() + "' is available.");
+        }
+        if (response.statusCode() == 401 || response.statusCode() == 403) {
+            return new ProviderStatus("gemini-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "Gemini probe returned HTTP " + response.statusCode() + ".");
+        }
+        return new ProviderStatus("gemini-chat", ProviderAvailabilityState.DEGRADED, true,
+                "Gemini probe returned HTTP " + response.statusCode() + ".");
     }
 
     public ProviderStatus ollamaModelStatus(String providerName, String configuredModel) {
@@ -185,6 +239,17 @@ public class ProviderStatusService {
                 .build(), url);
     }
 
+    private ProbeResult httpPost(String url, String payload, String apiKey) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .timeout(aiProperties.getProviderStatus().getReadTimeout());
+        if (StringUtils.hasText(apiKey)) {
+            builder.header("x-goog-api-key", apiKey);
+        }
+        return httpRequest(builder.build(), url);
+    }
+
     private ProbeResult httpRequest(HttpRequest request, String url) {
         try {
             Duration connectTimeout = aiProperties.getProviderStatus().getConnectTimeout();
@@ -201,6 +266,11 @@ public class ProviderStatusService {
             log.debug("Provider probe timed out for {}", url);
             return ProbeResult.timeoutProbe();
         }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.debug("Provider probe interrupted for {}", url);
+            return ProbeResult.unavailableProbe();
+        }
         catch (Exception e) {
             log.debug("Provider probe failed for {}", url, e);
             return ProbeResult.unavailableProbe();
@@ -212,6 +282,23 @@ public class ProviderStatusService {
                 .put("model", configuredModel)
                 .put("input", "health-check")
                 .toString();
+    }
+
+    private String geminiProbePayload(String configuredModel) {
+        return objectMapper.createObjectNode()
+                .putArray("contents")
+                .addObject()
+                .putArray("parts")
+                .addObject()
+                .put("text", "health-check")
+                .toPrettyString();
+    }
+
+    private String geminiGenerateContentUrl() {
+        return normalizeBaseUrl(aiProperties.getGemini().getBaseUrl())
+                + "/v1beta/models/"
+                + encodePathSegment(aiProperties.getGemini().getModel())
+                + ":generateContent";
     }
 
     private String formatTimeout(Duration timeout) {
