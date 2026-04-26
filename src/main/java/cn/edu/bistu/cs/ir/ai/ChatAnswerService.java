@@ -34,7 +34,7 @@ public class ChatAnswerService {
     private static final Logger log = LoggerFactory.getLogger(ChatAnswerService.class);
     private static final String INSUFFICIENT_EVIDENCE_ANSWER = "证据不足";
     private static final String KNOWLEDGE_BASE_ANSWER_PREFIX = "【本次回答基于知识库检索结果生成】";
-    private static final Pattern CITATION_MARKER_PATTERN = Pattern.compile("\\[(\\d+)]");
+    private static final Pattern CITATION_MARKER_PATTERN = Pattern.compile("\\[([^\\]]+)\\]");
     private static final Pattern HALLUCINATION_DISCLAIMER_PATTERN = Pattern.compile(
             "(片段|参考|资料|文献|信息|文本|文章).*?(没有|未)(能)?(明确)?(提到|提及|提供|给出|包含|说明|表明|发现|找到)|" +
             "(没有|未)(能)?(明确)?(提到|提及|提供|给出|包含|说明|表明|发现|找到).*?(片段|参考|资料|文献|信息|文本|文章)|" +
@@ -53,6 +53,8 @@ public class ChatAnswerService {
     private final ObjectProvider<ChatModel> chatModelProvider;
 
     private final ObjectProvider<GeminiChatClient> geminiChatClientProvider;
+
+    private final ObjectProvider<GlmChatClient> glmChatClientProvider;
 
     private final String chatProvider;
 
@@ -76,13 +78,15 @@ public class ChatAnswerService {
 
     private final Duration geminiChatTimeout;
 
+    private final Duration glmChatTimeout;
+
     private final ExecutorService chatCallExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     ChatAnswerService(HybridRetrievalService hybridRetrievalService,
                       ProviderStatusService providerStatusService,
                       AiProperties aiProperties,
                       ObjectProvider<ChatModel> chatModelProvider) {
-        this(hybridRetrievalService, providerStatusService, aiProperties, chatModelProvider, null);
+        this(hybridRetrievalService, providerStatusService, aiProperties, chatModelProvider, null, null);
     }
 
     @Autowired
@@ -90,7 +94,8 @@ public class ChatAnswerService {
                              ProviderStatusService providerStatusService,
                              AiProperties aiProperties,
                              ObjectProvider<ChatModel> chatModelProvider,
-                             ObjectProvider<GeminiChatClient> geminiChatClientProvider) {
+                             ObjectProvider<GeminiChatClient> geminiChatClientProvider,
+                             ObjectProvider<GlmChatClient> glmChatClientProvider) {
         this.hybridRetrievalService = hybridRetrievalService;
         this.providerStatusService = providerStatusService;
         this.chatProvider = aiProperties.getChatProvider();
@@ -106,6 +111,8 @@ public class ChatAnswerService {
         this.chatModelProvider = chatModelProvider;
         this.geminiChatClientProvider = geminiChatClientProvider;
         this.geminiChatTimeout = aiProperties.getGemini().getChatTimeout();
+        this.glmChatClientProvider = glmChatClientProvider;
+        this.glmChatTimeout = aiProperties.getGlm().getChatTimeout();
     }
 
     public ChatAnswerResult ask(String question) throws Exception {
@@ -113,26 +120,69 @@ public class ChatAnswerService {
         if (normalizedQuestion.isEmpty()) {
             throw new IllegalArgumentException("question不可以为空");
         }
-        Duration activeChatTimeout = isGeminiProvider() ? geminiChatTimeout : chatTimeout;
+        Duration activeChatTimeout = isGlmProvider() ? glmChatTimeout : (isGeminiProvider() ? geminiChatTimeout : chatTimeout);
         long deadlineNanos = System.nanoTime() + activeChatTimeout.toNanos();
 
-        ChatAnswerResult result = new ChatAnswerResult();
-        result.setQuestion(normalizedQuestion);
+        // 第一轮：原问题检索和问答
+        ChatAnswerResult firstRoundResult = performQuestionAnswering(normalizedQuestion, deadlineNanos, false);
 
-        HybridRetrievalResult retrieval = hybridRetrievalService.retrieve(normalizedQuestion, 1, chatContextTopK);
+        // 判断是否需要第二轮
+        boolean needsSecondRound = shouldRetryWithKeyword(normalizedQuestion, firstRoundResult.getAnswer());
+        log.info("needsSecondRound={}", needsSecondRound);
+
+        if (needsSecondRound) {
+            String keywordQuery = extractQuestionKeywords(normalizedQuestion);
+            log.info("第一轮返回证据不足，尝试关键词化重试: '{}' -> '{}'", normalizedQuestion, keywordQuery);
+
+            // 第二轮：关键词化检索和问答（使用缩减的上下文以降低延迟）
+            ChatAnswerResult secondRoundResult = performQuestionAnswering(keywordQuery, deadlineNanos, true);
+
+            log.info("第二轮结果: available={}, answer={}, citations={}",
+                    secondRoundResult.isAnswerAvailable(),
+                    secondRoundResult.getAnswer() != null ? secondRoundResult.getAnswer().substring(0, Math.min(50, secondRoundResult.getAnswer().length())) : "null",
+                    secondRoundResult.getCitations() != null ? secondRoundResult.getCitations().size() : "null");
+
+            // 比较两轮结果，选择更优的
+            if (isSecondRoundBetter(secondRoundResult, firstRoundResult)) {
+                log.info("第二轮结果更优，使用关键词化检索结果");
+                secondRoundResult.setQuestion(normalizedQuestion);  // 保持原问题
+                String mode = secondRoundResult.getRetrievalMode();
+                secondRoundResult.setRetrievalMode(mode != null ? mode + "+keyword-fallback" : "hybrid+keyword-fallback");
+                return secondRoundResult;
+            } else {
+                log.info("第二轮结果未优于第一轮，保留第一轮结果");
+            }
+        }
+
+        return firstRoundResult;
+    }
+
+    private ChatAnswerResult performQuestionAnswering(String query, long deadlineNanos, boolean isFallback) throws Exception {
+        ChatAnswerResult result = new ChatAnswerResult();
+        result.setQuestion(query);
+
+        // 在 fallback 场景下使用缩减的上下文参数
+        int effectiveTopK = isFallback ? Math.min(2, chatContextTopK) : chatContextTopK;
+        int effectiveCharLimit = isFallback ? Math.min(200, chatChunkCharLimit) : chatChunkCharLimit;
+        log.info("performQuestionAnswering: isFallback={}, effectiveTopK={}, effectiveCharLimit={}",
+                isFallback, effectiveTopK, effectiveCharLimit);
+
+        HybridRetrievalResult retrieval = hybridRetrievalService.retrieve(query, 1, effectiveTopK);
         result.setRetrievalMode(retrieval.getMode());
 
         if (retrieval.getResults() == null || retrieval.getResults().isEmpty()) {
             result.setCitations(List.of());
             result.setAnswerAvailable(true);
             result.setAnswer(INSUFFICIENT_EVIDENCE_ANSWER);
+            log.info("performQuestionAnswering: 检索结果为空，返回证据不足");
             return result;
         }
 
         ProviderStatusSnapshot snapshot = providerStatusService.snapshot();
-        if (snapshot.ollamaChat().state() != ProviderAvailabilityState.AVAILABLE) {
+        ProviderStatus activeChatStatus = providerStatusService.activeChatStatus();
+        if (activeChatStatus.state() != ProviderAvailabilityState.AVAILABLE) {
             result.setAnswerAvailable(false);
-            result.setDegradedReason(snapshot.ollamaChat().detail());
+            result.setDegradedReason(activeChatStatus.detail());
             clearRetrievalContext(result);
             return result;
         }
@@ -140,17 +190,23 @@ public class ChatAnswerService {
         result.setCitations(retrieval.getResults());
 
         try {
-            result.setAnswer(callActiveChat(buildPrompt(normalizedQuestion, retrieval.getResults(), retrieval.getMode()),
+            result.setAnswer(callActiveChat(buildPrompt(query, retrieval.getResults(), retrieval.getMode(), effectiveCharLimit),
                     remainingChatBudget(deadlineNanos)));
+            log.info("performQuestionAnswering: AI返回答案长度={}, 内容前50字符={}",
+                    result.getAnswer() != null ? result.getAnswer().length() : 0,
+                    result.getAnswer() != null ? result.getAnswer().substring(0, Math.min(50, result.getAnswer().length())) : "null");
             result.setAnswerAvailable(result.getAnswer() != null && !result.getAnswer().isBlank());
             if (result.isAnswerAvailable()) {
-                attemptCitationRepair(normalizedQuestion, retrieval, result, deadlineNanos);
+                attemptCitationRepair(query, retrieval, result, deadlineNanos, effectiveCharLimit);
                 applyCitationProvenance(result, retrieval.getResults());
             }
             if (!result.isAnswerAvailable()) {
                 result.setDegradedReason("聊天模型未返回可用答案");
                 clearRetrievalContext(result);
             }
+            log.info("performQuestionAnswering: 最终答案={}, citations数量={}",
+                    result.getAnswer() != null ? result.getAnswer().substring(0, Math.min(50, result.getAnswer().length())) : "null",
+                    result.getCitations() != null ? result.getCitations().size() : "null");
             return result;
         }
         catch (RuntimeException e) {
@@ -200,6 +256,14 @@ public class ChatAnswerService {
             return geminiChatClient.generate(promptText, timeoutBudget);
         }
 
+        if (isGlmProvider()) {
+            GlmChatClient glmChatClient = glmChatClientProvider == null ? null : glmChatClientProvider.getIfAvailable();
+            if (glmChatClient == null) {
+                throw new IllegalStateException("GLM chat client is unavailable");
+            }
+            return glmChatClient.generate(promptText, timeoutBudget);
+        }
+
         ChatModel chatModel = chatModelProvider.getIfAvailable();
         if (chatModel == null) {
             throw new IllegalStateException("聊天模型不可用");
@@ -220,12 +284,12 @@ public class ChatAnswerService {
     }
 
     private IllegalStateException exhaustedChatBudgetException(Throwable cause) {
-        Duration activeChatTimeout = isGeminiProvider() ? geminiChatTimeout : chatTimeout;
+        Duration activeChatTimeout = isGlmProvider() ? glmChatTimeout : (isGeminiProvider() ? geminiChatTimeout : chatTimeout);
         return new IllegalStateException(CHAT_TIMEOUT_MESSAGE_PREFIX + "，已在" + formatTimeout(activeChatTimeout) + "后返回降级结果", cause);
     }
 
     protected long chatTimeoutGuardBandNanos() {
-        Duration activeChatTimeout = isGeminiProvider() ? geminiChatTimeout : chatTimeout;
+        Duration activeChatTimeout = isGlmProvider() ? glmChatTimeout : (isGeminiProvider() ? geminiChatTimeout : chatTimeout);
         return requestTimeoutGuardBandNanos(activeChatTimeout);
     }
 
@@ -252,11 +316,12 @@ public class ChatAnswerService {
     private void attemptCitationRepair(String question,
                                        HybridRetrievalResult retrieval,
                                        ChatAnswerResult result,
-                                       long deadlineNanos) {
+                                       long deadlineNanos,
+                                       int effectiveCharLimit) {
         if (!shouldAttemptCitationRepair(retrieval, result.getAnswer())) {
             return;
         }
-        String repairedAnswer = tryRepairCitationAnswer(question, retrieval.getResults(), result.getAnswer(), deadlineNanos);
+        String repairedAnswer = tryRepairCitationAnswer(question, retrieval.getResults(), result.getAnswer(), deadlineNanos, effectiveCharLimit);
         if (repairedAnswer != null && !repairedAnswer.isBlank()) {
             result.setAnswer(repairedAnswer);
         }
@@ -268,17 +333,19 @@ public class ChatAnswerService {
                 && !retrieval.getResults().isEmpty()
                 && answer != null
                 && !answer.isBlank()
+                && !answer.trim().equals(INSUFFICIENT_EVIDENCE_ANSWER)
                 && resolveCitedChunks(answer, retrieval.getResults()).isEmpty();
     }
 
     private String tryRepairCitationAnswer(String question,
                                            List<HybridChunkResult> retrievalResults,
                                            String originalAnswer,
-                                           long deadlineNanos) {
+                                           long deadlineNanos,
+                                           int effectiveCharLimit) {
         String repairedAnswer = originalAnswer;
         for (int attempt = 0; attempt < MAX_CITATION_REPAIR_ATTEMPTS; attempt++) {
             try {
-                String candidateAnswer = callActiveChat(buildCitationRepairPrompt(question, originalAnswer, retrievalResults),
+                String candidateAnswer = callActiveChat(buildCitationRepairPrompt(question, originalAnswer, retrievalResults, effectiveCharLimit),
                         remainingChatBudget(deadlineNanos));
                 if (candidateAnswer == null || candidateAnswer.isBlank()) {
                     return repairedAnswer;
@@ -325,9 +392,18 @@ public class ChatAnswerService {
         Matcher matcher = CITATION_MARKER_PATTERN.matcher(answer);
         Set<Integer> citedIndexes = new LinkedHashSet<>();
         while (matcher.find()) {
-            int citedIndex = Integer.parseInt(matcher.group(1));
-            if (citedIndex >= 1 && citedIndex <= retrievalResults.size()) {
-                citedIndexes.add(citedIndex - 1);
+            String citationGroup = matcher.group(1);
+            String[] citations = citationGroup.split("\\s*,\\s*");
+            for (String citation : citations) {
+                try {
+                    int citedIndex = Integer.parseInt(citation.trim());
+                    if (citedIndex >= 1 && citedIndex <= retrievalResults.size()) {
+                        citedIndexes.add(citedIndex - 1);
+                    }
+                }
+                catch (NumberFormatException e) {
+                    log.warn("无法解析引用编号: {}", citation);
+                }
             }
         }
         if (citedIndexes.isEmpty()) {
@@ -355,10 +431,14 @@ public class ChatAnswerService {
         return "gemini".equalsIgnoreCase(chatProvider);
     }
 
-    String buildPrompt(String question, List<HybridChunkResult> chunks, String retrievalMode) {
+    private boolean isGlmProvider() {
+        return "glm".equalsIgnoreCase(chatProvider);
+    }
+
+    String buildPrompt(String question, List<HybridChunkResult> chunks, String retrievalMode, int effectiveCharLimit) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("你是问答助手。请基于给定片段回答问题。")
-                .append("\n如果片段没有提供答案，只回复“证据不足”。")
+                .append("\n如果片段没有提供答案，只回复\"证据不足\"。")
                 .append("\n用自己的话总结答案，在相关句子末尾加上[1]、[2]等编号表示信息来源。")
                 .append("\n\n检索模式: ").append(retrievalMode)
                 .append("\n问题: ").append(question)
@@ -367,15 +447,15 @@ public class ChatAnswerService {
         for (int i = 0; i < limit; i++) {
             HybridChunkResult chunk = chunks.get(i);
             prompt.append("[").append(i + 1).append("] ")
-                    .append(firstNonBlank(truncate(chunk.getChunkText(), chatChunkCharLimit), "无片段内容"))
+                    .append(firstNonBlank(truncate(chunk.getChunkText(), effectiveCharLimit), "无片段内容"))
                     .append("\n\n");
         }
         return prompt.toString();
     }
 
-    String buildCitationRepairPrompt(String question, String answer, List<HybridChunkResult> chunks) {
+    String buildCitationRepairPrompt(String question, String answer, List<HybridChunkResult> chunks, int effectiveCharLimit) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("请为原始答案添加[1]、[2]这样的片段编号。如果答案与片段无关，只回复“证据不足”。\n")
+        prompt.append("请为原始答案添加[1]、[2]这样的片段编号。如果答案与片段无关，只回复\"证据不足\"。\n")
                 .append("\n问题: ").append(question)
                 .append("\n原始答案: ").append(answer)
                 .append("\n\n片段:\n");
@@ -383,7 +463,7 @@ public class ChatAnswerService {
         for (int i = 0; i < limit; i++) {
             HybridChunkResult chunk = chunks.get(i);
             prompt.append("[").append(i + 1).append("] ")
-                    .append(firstNonBlank(truncate(chunk.getChunkText(), chatChunkCharLimit), "无片段内容"))
+                    .append(firstNonBlank(truncate(chunk.getChunkText(), effectiveCharLimit), "无片段内容"))
                     .append("\n\n");
         }
         return prompt.toString();
@@ -401,5 +481,54 @@ public class ChatAnswerService {
             return text;
         }
         return text.substring(0, maxChars) + "...";
+    }
+
+    private boolean shouldRetryWithKeyword(String question, String answer) {
+        if (answer == null || !answer.trim().equals(INSUFFICIENT_EVIDENCE_ANSWER)) {
+            log.info("shouldRetryWithKeyword: answer is null or not '{}' (actual: '{}')",
+                    INSUFFICIENT_EVIDENCE_ANSWER, answer);
+            return false;
+        }
+        String lowerQuestion = question.toLowerCase();
+        boolean hasQuestionWord = lowerQuestion.contains("为什么") || lowerQuestion.contains("为何")
+                || lowerQuestion.contains("怎么") || lowerQuestion.contains("如何")
+                || lowerQuestion.contains("多少") || lowerQuestion.contains("是否")
+                || lowerQuestion.contains("吗") || lowerQuestion.contains("呢")
+                || lowerQuestion.contains("什么") || lowerQuestion.contains("哪");
+        log.info("shouldRetryWithKeyword: hasQuestionWord={}", hasQuestionWord);
+        return hasQuestionWord;
+    }
+
+    boolean isSecondRoundBetter(ChatAnswerResult secondRound, ChatAnswerResult firstRound) {
+        if (secondRound == null || firstRound == null) {
+            log.info("第二轮更优判断: null check failed");
+            return false;
+        }
+        // 第二轮更优的条件：
+        // 1. 第二轮有引用（citations非空）
+        // 2. 且第二轮答案不是"证据不足"（可能是纯"证据不足"或带前缀）
+        boolean secondRoundHasCitations = secondRound.getCitations() != null && !secondRound.getCitations().isEmpty();
+        String secondRoundAnswer = secondRound.getAnswer();
+        boolean secondRoundHasAnswer = secondRoundAnswer != null
+                && !secondRoundAnswer.trim().equals(INSUFFICIENT_EVIDENCE_ANSWER);
+        log.info("第二轮更优判断: secondRoundHasCitations={}, secondRoundHasAnswer={}, isBetter={}",
+                secondRoundHasCitations, secondRoundHasAnswer, secondRoundHasCitations && secondRoundHasAnswer);
+        return secondRoundHasCitations && secondRoundHasAnswer;
+    }
+
+    String extractQuestionKeywords(String question) {
+        String keywords = question
+                .replaceAll("[为什么为何]", "")
+                .replaceAll("[怎么如何]", "")
+                .replaceAll("多少", "")
+                .replaceAll("是否", "")
+                .replaceAll("[吗呢]", "")
+                .replaceAll("什么", "")
+                .replaceAll("哪个", "")
+                .replaceAll("哪些", "")
+                .replaceAll("[？?]", "")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return keywords.isEmpty() ? question : keywords;
     }
 }

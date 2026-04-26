@@ -41,6 +41,14 @@ public class DemoHappyPathConfiguration {
 
     @Bean
     @Primary
+    public AiProperties demoHappyAiProperties() {
+        AiProperties properties = new AiProperties();
+        properties.setChatProvider("ollama");
+        return properties;
+    }
+
+    @Bean
+    @Primary
     public ProviderStatusService demoHappyProviderStatusService(AiProperties aiProperties, ObjectMapper objectMapper) {
         return new ProviderStatusService(aiProperties, objectMapper) {
             @Override
@@ -54,6 +62,12 @@ public class DemoHappyPathConfiguration {
                                 "demo-happy seeded vector store is active"),
                         true,
                         AiFallbackMode.AI_READY);
+            }
+
+            @Override
+            public ProviderStatus activeChatStatus() {
+                return new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true,
+                        "demo-happy seeded chat model is active");
             }
         };
     }

@@ -195,8 +195,8 @@ class ProviderStatusServiceDegradedTest {
         ProviderStatusSnapshot snapshot = new ProviderStatusService(properties, new ObjectMapper()).snapshot();
 
         Assertions.assertAll(
-                () -> Assertions.assertEquals("gemini-chat", snapshot.ollamaChat().provider()),
-                () -> Assertions.assertEquals(ProviderAvailabilityState.AVAILABLE, snapshot.ollamaChat().state()),
+                () -> Assertions.assertEquals("gemini-chat", snapshot.chat().provider()),
+                () -> Assertions.assertEquals(ProviderAvailabilityState.AVAILABLE, snapshot.chat().state()),
                 () -> Assertions.assertEquals(ProviderAvailabilityState.DISABLED, snapshot.ollamaEmbedding().state()),
                 () -> Assertions.assertEquals(AiFallbackMode.LEXICAL_ONLY, snapshot.fallbackMode()),
                 () -> Assertions.assertEquals("/v1beta/models/gemini-2.0-flash:generateContent", lastRawPath),

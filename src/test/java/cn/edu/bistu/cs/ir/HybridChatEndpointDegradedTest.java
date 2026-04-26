@@ -39,6 +39,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.when;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
+        "irdemo.ai.chat-provider=ollama",
         "irdemo.ai.ollama.base-url=http://127.0.0.1:9",
         "irdemo.ai.ollama.chat-timeout=100ms",
         "irdemo.ai.qdrant.enabled=true",
@@ -213,12 +214,14 @@ class HybridChatEndpointDegradedTest {
         ChatAskRequest request = new ChatAskRequest();
         request.setQuestion("请总结腾讯新闻中的AI相关新闻");
 
-        doReturn(new ProviderStatusSnapshot(
+        ProviderStatusSnapshot snapshot = new ProviderStatusSnapshot(
                 new ProviderStatus("ollama-chat", ProviderAvailabilityState.AVAILABLE, true, "ok"),
                 new ProviderStatus("ollama-embedding", ProviderAvailabilityState.AVAILABLE, true, "ok"),
                 new ProviderStatus("qdrant", ProviderAvailabilityState.AVAILABLE, true, "ok"),
                 true,
-                AiFallbackMode.AI_READY)).when(providerStatusService).snapshot();
+                AiFallbackMode.AI_READY);
+        doReturn(snapshot).when(providerStatusService).snapshot();
+        doReturn(snapshot.chat()).when(providerStatusService).activeChatStatus();
         when(chatModel.call(ArgumentMatchers.any(Prompt.class))).thenAnswer(invocation -> {
             Thread.sleep(1_000L);
             return new ChatResponse(java.util.List.of(new Generation(new AssistantMessage("迟到的答案[1]"))));

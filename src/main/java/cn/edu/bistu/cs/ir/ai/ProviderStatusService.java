@@ -1,5 +1,6 @@
 package cn.edu.bistu.cs.ir.ai;
 
+import cn.edu.bistu.cs.ir.index.IdxService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,17 +35,21 @@ public class ProviderStatusService {
 
     private final ObjectProvider<OllamaWarmupService> ollamaWarmupServiceProvider;
 
+    private final ObjectProvider<IdxService> idxServiceProvider;
+
     public ProviderStatusService(cn.edu.bistu.cs.ir.config.AiProperties aiProperties, ObjectMapper objectMapper) {
-        this(aiProperties, objectMapper, null);
+        this(aiProperties, objectMapper, null, null);
     }
 
     @Autowired
     public ProviderStatusService(cn.edu.bistu.cs.ir.config.AiProperties aiProperties,
                                   ObjectMapper objectMapper,
-                                  ObjectProvider<OllamaWarmupService> ollamaWarmupServiceProvider) {
+                                  ObjectProvider<OllamaWarmupService> ollamaWarmupServiceProvider,
+                                  ObjectProvider<IdxService> idxServiceProvider) {
         this.aiProperties = aiProperties;
         this.objectMapper = objectMapper;
         this.ollamaWarmupServiceProvider = ollamaWarmupServiceProvider;
+        this.idxServiceProvider = idxServiceProvider;
     }
 
     public ProviderStatusSnapshot snapshot() {
@@ -54,7 +59,20 @@ public class ProviderStatusService {
         AiFallbackMode fallbackMode = isAiReady(ollamaChat, ollamaEmbedding, qdrant)
                 ? AiFallbackMode.AI_READY
                 : AiFallbackMode.LEXICAL_ONLY;
-        return new ProviderStatusSnapshot(ollamaChat, ollamaEmbedding, qdrant, true, fallbackMode);
+        boolean lexicalAvailable = isLexicalAvailable();
+        return new ProviderStatusSnapshot(ollamaChat, ollamaEmbedding, qdrant, lexicalAvailable, fallbackMode);
+    }
+
+    private boolean isLexicalAvailable() {
+        if (idxServiceProvider == null) {
+            return true;
+        }
+        IdxService idxService = idxServiceProvider.getIfAvailable();
+        if (idxService == null || !idxService.isAvailable()) {
+            return false;
+        }
+        int documentCount = idxService.documentCount();
+        return documentCount > 0;
     }
 
     public ProviderStatus activeChatStatus() {
@@ -65,6 +83,9 @@ public class ProviderStatusService {
         }
         if ("gemini".equalsIgnoreCase(provider)) {
             return geminiChatStatus();
+        }
+        if ("glm".equalsIgnoreCase(provider)) {
+            return glmChatStatus();
         }
         return new ProviderStatus(provider + "-chat", ProviderAvailabilityState.DEGRADED, true,
                 "Unsupported chat provider '" + provider + "'.");
@@ -109,6 +130,47 @@ public class ProviderStatusService {
         }
         return new ProviderStatus("gemini-chat", ProviderAvailabilityState.DEGRADED, true,
                 "Gemini probe returned HTTP " + response.statusCode() + ".");
+    }
+
+    public ProviderStatus glmChatStatus() {
+        if (!aiProperties.getGlm().isEnabled()) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.DISABLED, false,
+                    "GLM support is disabled by configuration.");
+        }
+        if (!StringUtils.hasText(aiProperties.getGlm().getApiKey())) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "GLM API key is not configured.");
+        }
+        if (!StringUtils.hasText(aiProperties.getGlm().getModel())) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.DEGRADED, true,
+                    "GLM model is not configured.");
+        }
+
+        String probeUrl = glmChatCompletionsUrl();
+        ProbeResult probe = httpPostWithBearerAuth(probeUrl,
+                glmProbePayload(aiProperties.getGlm().getModel()),
+                aiProperties.getGlm().getApiKey());
+        if (probe.timedOut()) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "GLM probe timed out after " + formatTimeout(aiProperties.getProviderStatus().getReadTimeout())
+                            + " at " + probeUrl + ".");
+        }
+
+        HttpResponse<String> response = probe.response();
+        if (response == null) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "GLM did not respond at " + probeUrl + ".");
+        }
+        if (response.statusCode() >= 200 && response.statusCode() < 300) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.AVAILABLE, true,
+                    "GLM chat model '" + aiProperties.getGlm().getModel() + "' is available.");
+        }
+        if (response.statusCode() == 401 || response.statusCode() == 403) {
+            return new ProviderStatus("glm-chat", ProviderAvailabilityState.UNAVAILABLE, true,
+                    "GLM probe returned HTTP " + response.statusCode() + ".");
+        }
+        return new ProviderStatus("glm-chat", ProviderAvailabilityState.DEGRADED, true,
+                "GLM probe returned HTTP " + response.statusCode() + ".");
     }
 
     public ProviderStatus ollamaModelStatus(String providerName, String configuredModel) {
@@ -250,6 +312,15 @@ public class ProviderStatusService {
         return httpRequest(builder.build(), url);
     }
 
+    private ProbeResult httpPostWithBearerAuth(String url, String payload, String apiKey) {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(url))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .timeout(aiProperties.getProviderStatus().getReadTimeout());
+        return httpRequest(builder.build(), url);
+    }
+
     private ProbeResult httpRequest(HttpRequest request, String url) {
         try {
             Duration connectTimeout = aiProperties.getProviderStatus().getConnectTimeout();
@@ -302,6 +373,20 @@ public class ProviderStatusService {
                 + "/v1beta/models/"
                 + encodePathSegment(aiProperties.getGemini().getModel())
                 + ":generateContent";
+    }
+
+    private String glmProbePayload(String configuredModel) {
+        var root = objectMapper.createObjectNode();
+        root.put("model", configuredModel);
+        var messages = root.putArray("messages");
+        var message = messages.addObject();
+        message.put("role", "user");
+        message.put("content", "请只回复：ready");
+        return root.toPrettyString();
+    }
+
+    private String glmChatCompletionsUrl() {
+        return normalizeBaseUrl(aiProperties.getGlm().getBaseUrl()) + "/api/paas/v4/chat/completions";
     }
 
     private String formatTimeout(Duration timeout) {

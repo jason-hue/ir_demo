@@ -3,6 +3,7 @@ package cn.edu.bistu.cs.ir;
 import cn.edu.bistu.cs.ir.ai.ChatAnswerResult;
 import cn.edu.bistu.cs.ir.ai.HybridRetrievalResult;
 import cn.edu.bistu.cs.ir.ai.ProviderStatusService;
+import cn.edu.bistu.cs.ir.ai.ProviderStatusSnapshot;
 import cn.edu.bistu.cs.ir.controller.dto.ChatAskRequest;
 import cn.edu.bistu.cs.ir.controller.dto.HybridQueryRequest;
 import cn.edu.bistu.cs.ir.index.ArticleIdxFields;
@@ -59,6 +60,7 @@ import static org.mockito.Mockito.when;
         "irdemo.ai.ollama.warmup-enabled=false",
         "irdemo.ai.qdrant.enabled=false",
         "irdemo.ai.ollama.chat-timeout=100ms",
+        "irdemo.ai.chat-provider=ollama",
         "irdemo.dir.home=workspace/test-seeded-hybrid-chat-happy",
         "irdemo.dir.idx=${irdemo.dir.home}/idx",
         "irdemo.dir.crawler=${irdemo.dir.home}/crawler"
@@ -93,7 +95,9 @@ class SeededHybridChatEndpointHappyPathTest {
         Blog article = DemoFixtureSupport.firstRuntimeSeedArticle(objectMapper);
         ArticleChunkMetadata chunk = DemoFixtureSupport.firstChunk(articleChunkingService, article);
 
-        when(providerStatusService.snapshot()).thenReturn(DemoFixtureSupport.availableSnapshot());
+        ProviderStatusSnapshot snapshot = DemoFixtureSupport.availableSnapshot();
+        when(providerStatusService.snapshot()).thenReturn(snapshot);
+        when(providerStatusService.activeChatStatus()).thenReturn(snapshot.chat());
         when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of(vectorDocument(article, chunk)));
         when(chatModel.call(ArgumentMatchers.any(Prompt.class))).thenReturn(
                 new ChatResponse(List.of(new Generation(new AssistantMessage("基于固定种子数据的检索问答案例答案[1]")))));

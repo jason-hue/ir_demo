@@ -41,6 +41,8 @@ public class TencentNewsCrawler implements PageProcessor {
 
     private static final Pattern CHANNEL_URL_PATTERN = Pattern.compile("https?://news\\.qq\\.com/ch/([a-z0-9_-]+)/?", Pattern.CASE_INSENSITIVE);
 
+    private static final Pattern VIDEO_URL_PATTERN = Pattern.compile("https?://(?:news|new)\\.qq\\.com/rain/a/\\d{8}V[0-9A-Z]+", Pattern.CASE_INSENSITIVE);
+
     private static final Pattern CHANNEL_KEY_PATTERN = Pattern.compile("window\\.channelInfo\\s*=\\s*\\{.*?\"channelKey\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     private static final Pattern WINDOW_DATA_PATTERN = Pattern.compile("window\\.DATA\\s*=\\s*(\\{.*?});", Pattern.DOTALL);
@@ -126,6 +128,10 @@ public class TencentNewsCrawler implements PageProcessor {
         for (String link : links) {
             String normalized = normalizeTencentUrl(link);
             if (isArticleUrl(normalized)) {
+                if (isVideoUrl(normalized)) {
+                    log.info("跳过视频页面URL [{}]，仅抓取文本文章", normalized);
+                    continue;
+                }
                 articleUrls.add(normalized);
             }
         }
@@ -282,6 +288,10 @@ public class TencentNewsCrawler implements PageProcessor {
                 if (value instanceof String stringValue && FEED_URL_KEYS.contains(entry.getKey())) {
                     String normalized = normalizeTencentUrl(stringValue);
                     if (isArticleUrl(normalized)) {
+                        if (isVideoUrl(normalized)) {
+                            log.info("跳过视频页面URL [{}]，仅抓取文本文章", normalized);
+                            continue;
+                        }
                         articleUrls.add(normalized);
                     }
                     continue;
@@ -312,6 +322,10 @@ public class TencentNewsCrawler implements PageProcessor {
 
     private boolean isArticleUrl(String url) {
         return !StringUtil.isEmpty(url) && ARTICLE_URL_PATTERN.matcher(url).matches();
+    }
+
+    private boolean isVideoUrl(String url) {
+        return !StringUtil.isEmpty(url) && VIDEO_URL_PATTERN.matcher(url).matches();
     }
 
     private boolean containsWindowData(String rawHtml) {

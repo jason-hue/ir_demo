@@ -19,6 +19,8 @@ public class AiProperties {
 
     private Gemini gemini = new Gemini();
 
+    private Glm glm = new Glm();
+
     private Retrieval retrieval = new Retrieval();
 
     private Qdrant qdrant = new Qdrant();
@@ -81,7 +83,7 @@ public class AiProperties {
 
         private String apiKey;
 
-        private String model = "gemini-2.0-flash";
+        private String model = "gemini-2.5-flash";
 
         private Duration chatTimeout = Duration.ofSeconds(120);
 
@@ -92,6 +94,27 @@ public class AiProperties {
         private Integer maxOutputTokens = 512;
 
         private Integer thinkingBudget = 0;
+    }
+
+    @Getter
+    @Setter
+    public static class Glm {
+
+        private boolean enabled = false;
+
+        private String baseUrl = "https://open.bigmodel.cn";
+
+        private String apiKey;
+
+        private String model = "glm-4-flash";
+
+        private Duration chatTimeout = Duration.ofSeconds(120);
+
+        private double temperature = 0.1d;
+
+        private double topP = 0.8d;
+
+        private Integer maxTokens = 512;
     }
 
     @Getter
